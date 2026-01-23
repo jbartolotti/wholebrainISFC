@@ -197,22 +197,74 @@ def apply_mask_and_extract_timeseries(nifti_file: str, mask_file: str) -> np.nda
     return masked_voxels.T
 
 
-def apply_downsampled_mask_and_extract_timeseries(downsampled_data: np.ndarray,
-                                                   downsampled_mask: np.ndarray) -> np.ndarray:
+def create_global_mask(participant_ids: list, conditions: list, data_dir: str,
+                       target_resolution: float = 6.0) -> np.ndarray:
     """
-    Apply downsampled grey matter mask and extract time series from voxels in the mask.
+    Create a global mask as the union (logical OR) of all individual masks.
+    
+    Parameters
+    ----------
+    participant_ids : list
+        List of participant identifiers
+    conditions : list
+        List of condition names
+    data_dir : str
+        Directory containing mask files
+    target_resolution : float
+        Target resolution for downsampling masks
+    
+    Returns
+    -------
+    np.ndarray
+        Global mask (3D array) with value 1 where any individual mask has data
+    """
+    global_mask = None
+    
+    for participant_id in participant_ids:
+        for condition in conditions:
+            try:
+                mask_file = find_gm_mask_file(participant_id, condition, data_dir)
+                downsampled_mask = downsample_mask(mask_file, target_resolution)
+                
+                if global_mask is None:
+                    # Initialize with first mask
+                    global_mask = (downsampled_mask > 0).astype(np.float32)
+                else:
+                    # Logical OR - union of all masks
+                    global_mask = np.logical_or(global_mask, downsampled_mask > 0).astype(np.float32)
+            except FileNotFoundError:
+                print(f"  Warning: Mask not found for {participant_id}, {condition}. Skipping.")
+                continue
+    
+    if global_mask is None:
+        raise ValueError("No valid masks found to create global mask")
+    
+    return global_mask
+
+
+def apply_global_and_individual_mask(downsampled_data: np.ndarray,
+                                     global_mask: np.ndarray,
+                                     individual_mask: np.ndarray) -> np.ndarray:
+    """
+    Extract time series using global mask, filling invalid voxels with NaN.
+    
+    Extracts time series for all voxels in the global mask. For voxels that are
+    in the global mask but NOT in the individual mask, fills with np.nan.
     
     Parameters
     ----------
     downsampled_data : np.ndarray
         Downsampled 4D functional data (x, y, z, time)
-    downsampled_mask : np.ndarray
-        Downsampled 3D grey matter mask (x, y, z)
+    global_mask : np.ndarray
+        3D global mask covering all participants/conditions
+    individual_mask : np.ndarray
+        3D individual mask for this specific participant/condition
     
     Returns
     -------
     np.ndarray
-        Time series matrix of shape (n_timepoints, n_voxels_in_mask)
+        Time series matrix of shape (n_timepoints, n_global_voxels)
+        Invalid voxels filled with np.nan
     """
     # Ensure data is 4D
     if downsampled_data.ndim != 4:
@@ -222,13 +274,24 @@ def apply_downsampled_mask_and_extract_timeseries(downsampled_data: np.ndarray,
     
     # Flatten spatial dimensions
     data_reshaped = downsampled_data.reshape(-1, n_timepoints)
-    mask_flat = downsampled_mask.flatten()
+    global_mask_flat = global_mask.flatten()
+    individual_mask_flat = individual_mask.flatten()
     
-    # Extract voxels where mask > 0
-    masked_voxels = data_reshaped[mask_flat > 0, :]
+    # Initialize output with NaN
+    n_global_voxels = int(np.sum(global_mask_flat > 0))
+    timeseries = np.full((n_timepoints, n_global_voxels), np.nan, dtype=np.float64)
     
-    # Return as (n_timepoints, n_voxels)
-    return masked_voxels.T
+    # Get indices for global mask voxels
+    global_indices = np.where(global_mask_flat > 0)[0]
+    
+    # For each global voxel, check if it's in individual mask
+    for i, global_idx in enumerate(global_indices):
+        if individual_mask_flat[global_idx] > 0:
+            # Valid voxel - extract actual time series
+            timeseries[:, i] = data_reshaped[global_idx, :]
+        # else: leave as NaN (already initialized)
+    
+    return timeseries
 
 
 def find_gm_mask_file(participant_id: str, condition: str, data_dir: str) -> str:
@@ -386,6 +449,9 @@ def pearson_correlation_matrix(timeseries: np.ndarray) -> np.ndarray:
     """
     Calculate Pearson correlation matrix between all voxel time series.
     
+    Handles NaN values by computing correlations only on valid (non-NaN) timepoints.
+    Voxels with all NaN will have NaN correlations with all other voxels.
+    
     Parameters
     ----------
     timeseries : np.ndarray
@@ -394,14 +460,34 @@ def pearson_correlation_matrix(timeseries: np.ndarray) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        NxN correlation matrix
+        NxN correlation matrix (may contain NaN for invalid voxels)
     """
-    # Standardize each voxel's time series (zero mean, unit variance)
-    ts_standardized = (timeseries - timeseries.mean(axis=0)) / timeseries.std(axis=0)
+    n_voxels = timeseries.shape[1]
+    corr_matrix = np.zeros((n_voxels, n_voxels))
     
-    # Calculate correlation matrix as (1/N) * X^T * X where X is standardized
-    n_timepoints = timeseries.shape[0]
-    corr_matrix = (ts_standardized.T @ ts_standardized) / n_timepoints
+    # Use numpy's corrcoef which handles NaN via masking
+    for i in range(n_voxels):
+        for j in range(i, n_voxels):
+            # Find valid (non-NaN) timepoints for both voxels
+            valid_mask = ~(np.isnan(timeseries[:, i]) | np.isnan(timeseries[:, j]))
+            
+            if np.sum(valid_mask) > 1:  # Need at least 2 points for correlation
+                valid_i = timeseries[valid_mask, i]
+                valid_j = timeseries[valid_mask, j]
+                
+                # Calculate correlation
+                if np.std(valid_i) > 0 and np.std(valid_j) > 0:
+                    corr = np.corrcoef(valid_i, valid_j)[0, 1]
+                    corr_matrix[i, j] = corr
+                    corr_matrix[j, i] = corr
+                else:
+                    # Zero variance - set to NaN
+                    corr_matrix[i, j] = np.nan
+                    corr_matrix[j, i] = np.nan
+            else:
+                # Not enough valid data - set to NaN
+                corr_matrix[i, j] = np.nan
+                corr_matrix[j, i] = np.nan
     
     return corr_matrix
 
@@ -456,6 +542,7 @@ def calculate_fc_change(treatment_fc: np.ndarray, control_fc: np.ndarray) -> np.
 
 def process_participant(participant_id: str, data_dir: str,
                         treatment_condition: str, control_condition: str,
+                        global_mask: np.ndarray,
                         target_resolution: float = 6.0,
                         apply_censoring: bool = False) -> np.ndarray:
     """
@@ -463,6 +550,9 @@ def process_participant(participant_id: str, data_dir: str,
     
     Orchestrates all steps: validation, downsampling, masking, 
     FC calculation, and difference matrix computation.
+    
+    Uses a global mask to ensure all FC matrices have the same dimensions.
+    Voxels outside individual masks are filled with NaN.
     
     Parameters
     ----------
@@ -474,6 +564,8 @@ def process_participant(participant_id: str, data_dir: str,
         Name of treatment condition
     control_condition : str
         Name of control condition
+    global_mask : np.ndarray
+        Global mask (union of all individual masks) at target resolution
     target_resolution : float
         Target voxel resolution in mm (default 6.0)
     apply_censoring : bool, optional
@@ -482,7 +574,7 @@ def process_participant(participant_id: str, data_dir: str,
     Returns
     -------
     np.ndarray
-        FC change matrix for the participant
+        FC change matrix for the participant (may contain NaN for invalid voxels)
     """
     # Step 1: Validate input data
     print(f"Processing participant {participant_id}...")
@@ -502,13 +594,13 @@ def process_participant(participant_id: str, data_dir: str,
     treatment_mask_downsampled = downsample_mask(treatment_mask_file, target_resolution)
     control_mask_downsampled = downsample_mask(control_mask_file, target_resolution)
     
-    # Step 3: Apply masks and extract time series from downsampled data
-    print(f"  Applying downsampled grey matter masks and extracting time series...")
-    treatment_timeseries = apply_downsampled_mask_and_extract_timeseries(
-        treatment_downsampled, treatment_mask_downsampled
+    # Step 3: Apply global and individual masks, extract time series (with NaN for invalid voxels)
+    print(f"  Applying masks and extracting time series...")
+    treatment_timeseries = apply_global_and_individual_mask(
+        treatment_downsampled, global_mask, treatment_mask_downsampled
     )
-    control_timeseries = apply_downsampled_mask_and_extract_timeseries(
-        control_downsampled, control_mask_downsampled
+    control_timeseries = apply_global_and_individual_mask(
+        control_downsampled, global_mask, control_mask_downsampled
     )
     
     # Step 4: Apply censoring if requested
