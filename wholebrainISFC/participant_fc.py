@@ -111,27 +111,137 @@ def downsample_nifti(nifti_file: str, target_resolution: float = 6.0) -> np.ndar
     return downsampled
 
 
-def apply_gm_mask_and_extract_timeseries(nifti_file: str, gm_mask_file: str) -> np.ndarray:
+def find_gm_mask_file(participant_id: str, condition: str, data_dir: str) -> str:
+    """
+    Find the participant-specific grey matter mask file.
+    
+    Looks for a file named {participant_id}_{condition}_GM.nii[.gz] in data_dir.
+    
+    Parameters
+    ----------
+    participant_id : str
+        Participant identifier
+    condition : str
+        Condition name
+    data_dir : str
+        Directory containing the mask file
+    
+    Returns
+    -------
+    str
+        Path to the grey matter mask file
+    
+    Raises
+    ------
+    FileNotFoundError
+        If the mask file is not found
+    """
+    gm_mask_name = f"{participant_id}_{condition}_GM"
+    
+    # Try both .nii.gz and .nii extensions
+    for ext in ['.nii.gz', '.nii']:
+        candidate = os.path.join(data_dir, gm_mask_name + ext)
+        if os.path.exists(candidate):
+            return candidate
+    
+    raise FileNotFoundError(f"Grey matter mask not found for participant {participant_id}, "
+                           f"condition {condition}: expected {os.path.join(data_dir, gm_mask_name + '.[nii|nii.gz]')}")
+
+
+def load_censoring_vector(participant_id: str, condition: str, data_dir: str, n_timepoints: int) -> np.ndarray:
+    """
+    Load censoring vector for a participant and condition.
+    
+    Looks for a file named {participant_id}_{condition}_censor.[1D|tsv|csv|txt] in data_dir.
+    
+    Parameters
+    ----------
+    participant_id : str
+        Participant identifier
+    condition : str
+        Condition name
+    data_dir : str
+        Directory containing the censoring file
+    n_timepoints : int
+        Expected number of timepoints (for validation)
+    
+    Returns
+    -------
+    np.ndarray
+        Boolean array of shape (n_timepoints,) where True = keep, False = censor
+    
+    Raises
+    ------
+    FileNotFoundError
+        If the censoring file is not found
+    ValueError
+        If the censoring vector length doesn't match n_timepoints
+    """
+    censor_base = f"{participant_id}_{condition}_censor"
+    censor_file = None
+    
+    # Try various file extensions
+    for ext in ['.1D', '.tsv', '.csv', '.txt']:
+        candidate = os.path.join(data_dir, censor_base + ext)
+        if os.path.exists(candidate):
+            censor_file = candidate
+            break
+    
+    if censor_file is None:
+        raise FileNotFoundError(f"Censoring file not found for participant {participant_id}, "
+                               f"condition {condition}: expected {os.path.join(data_dir, censor_base + '.[1D|tsv|csv|txt]')}")
+    
+    # Load the censoring vector
+    censor_vector = np.loadtxt(censor_file)
+    
+    # Ensure it's 1D
+    if censor_vector.ndim != 1:
+        raise ValueError(f"Censoring vector must be 1D, got shape {censor_vector.shape}")
+    
+    # Validate length
+    if len(censor_vector) != n_timepoints:
+        raise ValueError(f"Censoring vector length {len(censor_vector)} does not match "
+                        f"number of timepoints {n_timepoints}")
+    
+    # Convert to boolean: 1 = keep (True), 0 = censor (False)
+    censor_mask = censor_vector.astype(bool)
+    
+    return censor_mask
+
+
+def apply_gm_mask_and_extract_timeseries(nifti_file: str, participant_id: str, 
+                                         condition: str, data_dir: str,
+                                         apply_censoring: bool = False) -> np.ndarray:
     """
     Apply grey matter mask and extract time series from all voxels in the mask.
+    
+    Optionally applies censoring to remove timepoints marked as 0 in the censoring vector.
     
     Parameters
     ----------
     nifti_file : str
         Path to input nifti file
-    gm_mask_file : str
-        Path to grey matter mask file
+    participant_id : str
+        Participant identifier (for finding participant-specific GM mask)
+    condition : str
+        Condition name (for finding participant-specific GM mask and censoring vector)
+    data_dir : str
+        Directory containing the mask and censoring files
+    apply_censoring : bool, optional
+        If True, apply censoring to the time series (default: False)
     
     Returns
     -------
     np.ndarray
-        Time series matrix of shape (n_timepoints, n_voxels_in_mask)
+        Time series matrix of shape (n_timepoints, n_voxels_in_mask) or 
+        (n_timepoints_after_censoring, n_voxels_in_mask) if censoring is applied
     """
     # Load the nifti file
     img = nib.load(nifti_file)
     data = img.get_fdata()
     
-    # Load the mask
+    # Find and load the participant-specific grey matter mask
+    gm_mask_file = find_gm_mask_file(participant_id, condition, data_dir)
     mask_img = nib.load(gm_mask_file)
     mask = mask_img.get_fdata()
     
@@ -145,7 +255,15 @@ def apply_gm_mask_and_extract_timeseries(nifti_file: str, gm_mask_file: str) -> 
         # Extract voxels where mask > 0
         masked_voxels = data_reshaped[mask_flat > 0, :]
         # Return as (n_timepoints, n_voxels)
-        return masked_voxels.T
+        timeseries = masked_voxels.T
+        
+        # Apply censoring if requested
+        if apply_censoring:
+            censor_mask = load_censoring_vector(participant_id, condition, data_dir, n_timepoints)
+            # Keep only non-censored timepoints
+            timeseries = timeseries[censor_mask, :]
+        
+        return timeseries
     else:
         raise ValueError(f"Expected 4D nifti file with time dimension, got shape {data.shape}")
 
@@ -248,9 +366,10 @@ def calculate_fc_change(treatment_fc: np.ndarray, control_fc: np.ndarray) -> np.
     return fc_change
 
 
-def process_participant(participant_id: str, data_dir: str, gm_mask_file: str,
+def process_participant(participant_id: str, data_dir: str,
                         treatment_condition: str, control_condition: str,
-                        target_resolution: float = 6.0) -> np.ndarray:
+                        target_resolution: float = 6.0,
+                        apply_censoring: bool = False) -> np.ndarray:
     """
     Complete processing pipeline for a single participant.
     
@@ -262,15 +381,15 @@ def process_participant(participant_id: str, data_dir: str, gm_mask_file: str,
     participant_id : str
         Participant identifier
     data_dir : str
-        Directory containing brain nifti data
-    gm_mask_file : str
-        Path to grey matter mask file
+        Directory containing brain nifti data and mask files
     treatment_condition : str
         Name of treatment condition
     control_condition : str
         Name of control condition
     target_resolution : float
         Target voxel resolution in mm (default 6.0)
+    apply_censoring : bool, optional
+        If True, apply censoring to time series before FC calculation (default: False)
     
     Returns
     -------
@@ -295,11 +414,15 @@ def process_participant(participant_id: str, data_dir: str, gm_mask_file: str,
     
     # Step 3: Apply mask and extract time series
     print(f"  Applying grey matter mask and extracting time series...")
+    if apply_censoring:
+        print(f"    (Censoring enabled)")
     treatment_timeseries = apply_gm_mask_and_extract_timeseries(
-        treatment_file, gm_mask_file
+        treatment_file, participant_id, treatment_condition, data_dir,
+        apply_censoring=apply_censoring
     )
     control_timeseries = apply_gm_mask_and_extract_timeseries(
-        control_file, gm_mask_file
+        control_file, participant_id, control_condition, data_dir,
+        apply_censoring=apply_censoring
     )
     
     # Step 4: Calculate FC matrices
