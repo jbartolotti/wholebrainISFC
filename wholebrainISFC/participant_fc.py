@@ -449,45 +449,49 @@ def pearson_correlation_matrix(timeseries: np.ndarray) -> np.ndarray:
     """
     Calculate Pearson correlation matrix between all voxel time series.
     
-    Handles NaN values by computing correlations only on valid (non-NaN) timepoints.
-    Voxels with all NaN will have NaN correlations with all other voxels.
+    Efficiently handles NaN values by computing correlations only on valid voxels
+    (those without all-NaN columns), then expanding back to full size.
     
     Parameters
     ----------
     timeseries : np.ndarray
         Time series matrix of shape (n_timepoints, n_voxels)
+        May contain all-NaN columns for voxels outside individual mask
     
     Returns
     -------
     np.ndarray
-        NxN correlation matrix (may contain NaN for invalid voxels)
+        NxN correlation matrix (contains NaN for invalid voxels)
     """
     n_voxels = timeseries.shape[1]
-    corr_matrix = np.zeros((n_voxels, n_voxels))
     
-    # Use numpy's corrcoef which handles NaN via masking
-    for i in range(n_voxels):
-        for j in range(i, n_voxels):
-            # Find valid (non-NaN) timepoints for both voxels
-            valid_mask = ~(np.isnan(timeseries[:, i]) | np.isnan(timeseries[:, j]))
-            
-            if np.sum(valid_mask) > 1:  # Need at least 2 points for correlation
-                valid_i = timeseries[valid_mask, i]
-                valid_j = timeseries[valid_mask, j]
-                
-                # Calculate correlation
-                if np.std(valid_i) > 0 and np.std(valid_j) > 0:
-                    corr = np.corrcoef(valid_i, valid_j)[0, 1]
-                    corr_matrix[i, j] = corr
-                    corr_matrix[j, i] = corr
-                else:
-                    # Zero variance - set to NaN
-                    corr_matrix[i, j] = np.nan
-                    corr_matrix[j, i] = np.nan
-            else:
-                # Not enough valid data - set to NaN
-                corr_matrix[i, j] = np.nan
-                corr_matrix[j, i] = np.nan
+    # Find which voxels are valid (not all NaN)
+    valid_voxels = ~np.all(np.isnan(timeseries), axis=0)
+    n_valid = np.sum(valid_voxels)
+    
+    if n_valid == 0:
+        # No valid voxels - return all NaN
+        return np.full((n_voxels, n_voxels), np.nan)
+    
+    # Extract only valid voxels
+    ts_valid = timeseries[:, valid_voxels]
+    
+    # Standardize (zero mean, unit variance)
+    means = np.mean(ts_valid, axis=0)
+    stds = np.std(ts_valid, axis=0)
+    ts_standardized = (ts_valid - means) / stds
+    
+    # Fast matrix multiplication: (1/N) * X^T * X where X is standardized
+    n_timepoints = ts_valid.shape[0]
+    corr_valid = (ts_standardized.T @ ts_standardized) / n_timepoints
+    
+    # Create full-size correlation matrix filled with NaN
+    corr_matrix = np.full((n_voxels, n_voxels), np.nan)
+    
+    # Insert valid correlations using fancy indexing (much faster than loops)
+    valid_indices = np.where(valid_voxels)[0]
+    ix = np.ix_(valid_indices, valid_indices)
+    corr_matrix[ix] = corr_valid
     
     return corr_matrix
 
