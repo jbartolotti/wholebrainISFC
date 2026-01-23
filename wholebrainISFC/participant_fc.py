@@ -80,7 +80,7 @@ def validate_participant_data(participant_id: str, data_dir: str,
 
 def downsample_nifti(nifti_file: str, target_resolution: float = 6.0) -> np.ndarray:
     """
-    Downsample nifti file to 6x6x6 mm³ voxels from higher resolution (typically 3mm³).
+    Downsample nifti file to target resolution (e.g., 6x6x6 mm³ from 3mm³).
     
     Parameters
     ----------
@@ -99,16 +99,136 @@ def downsample_nifti(nifti_file: str, target_resolution: float = 6.0) -> np.ndar
     data = img.get_fdata()
     affine = img.affine
     
+    # Get current voxel dimensions (spatial dimensions only)
+    voxel_dims = np.array([np.linalg.norm(affine[:3, i]) for i in range(3)])
+    
+    # Calculate scaling factors for spatial dimensions
+    spatial_scaling = voxel_dims / target_resolution
+    
+    # Create scaling factors for all dimensions
+    # For 4D data (x, y, z, time), we only downsample spatial dimensions, not time
+    if data.ndim == 4:
+        scaling_factors = list(spatial_scaling) + [1.0]  # Don't scale time dimension
+    else:
+        scaling_factors = spatial_scaling
+    
+    # Downsample using scipy zoom with linear interpolation for continuous data
+    downsampled = zoom(data, scaling_factors, order=1)
+    
+    return downsampled
+
+
+def downsample_mask(mask_file: str, target_resolution: float = 6.0) -> np.ndarray:
+    """
+    Downsample a 3D mask to match target resolution.
+    
+    Uses nearest-neighbor interpolation to preserve binary nature of mask.
+    
+    Parameters
+    ----------
+    mask_file : str
+        Path to mask file
+    target_resolution : float
+        Target voxel resolution in mm (default 6.0 for 6x6x6 mm³)
+    
+    Returns
+    -------
+    np.ndarray
+        Downsampled mask data
+    """
+    # Load the mask file
+    img = nib.load(mask_file)
+    data = img.get_fdata()
+    affine = img.affine
+    
     # Get current voxel dimensions
     voxel_dims = np.array([np.linalg.norm(affine[:3, i]) for i in range(3)])
     
     # Calculate scaling factors
-    scaling_factors = voxel_dims / target_resolution
+    spatial_scaling = voxel_dims / target_resolution
     
-    # Downsample using scipy zoom (handles 4D data, downsampling last dimension is handled properly)
-    downsampled = zoom(data, scaling_factors, order=1)
+    # Downsample using nearest neighbor (order=0) for masks to preserve binary structure
+    downsampled = zoom(data, spatial_scaling, order=0)
     
     return downsampled
+
+
+def apply_mask_and_extract_timeseries(nifti_file: str, mask_file: str) -> np.ndarray:
+    """
+    Apply grey matter mask and extract time series from all voxels in the mask.
+    
+    Masking is done at the original resolution to avoid edge artifacts from
+    resampling binary masks.
+    
+    Parameters
+    ----------
+    nifti_file : str
+        Path to input 4D nifti file
+    mask_file : str
+        Path to grey matter mask file
+    
+    Returns
+    -------
+    np.ndarray
+        Time series matrix of shape (n_timepoints, n_voxels_in_mask)
+    """
+    # Load the nifti file
+    img = nib.load(nifti_file)
+    data = img.get_fdata()
+    
+    # Load the mask
+    mask_img = nib.load(mask_file)
+    mask = mask_img.get_fdata()
+    
+    # Ensure data is 4D
+    if data.ndim != 4:
+        raise ValueError(f"Expected 4D nifti data with time dimension, got shape {data.shape}")
+    
+    n_timepoints = data.shape[3]
+    
+    # Flatten spatial dimensions
+    data_reshaped = data.reshape(-1, n_timepoints)
+    mask_flat = mask.flatten()
+    
+    # Extract voxels where mask > 0
+    masked_voxels = data_reshaped[mask_flat > 0, :]
+    
+    # Return as (n_timepoints, n_voxels)
+    return masked_voxels.T
+
+
+def apply_downsampled_mask_and_extract_timeseries(downsampled_data: np.ndarray,
+                                                   downsampled_mask: np.ndarray) -> np.ndarray:
+    """
+    Apply downsampled grey matter mask and extract time series from voxels in the mask.
+    
+    Parameters
+    ----------
+    downsampled_data : np.ndarray
+        Downsampled 4D functional data (x, y, z, time)
+    downsampled_mask : np.ndarray
+        Downsampled 3D grey matter mask (x, y, z)
+    
+    Returns
+    -------
+    np.ndarray
+        Time series matrix of shape (n_timepoints, n_voxels_in_mask)
+    """
+    # Ensure data is 4D
+    if downsampled_data.ndim != 4:
+        raise ValueError(f"Expected 4D nifti data with time dimension, got shape {downsampled_data.shape}")
+    
+    n_timepoints = downsampled_data.shape[3]
+    
+    # Flatten spatial dimensions
+    data_reshaped = downsampled_data.reshape(-1, n_timepoints)
+    mask_flat = downsampled_mask.flatten()
+    
+    # Extract voxels where mask > 0
+    masked_voxels = data_reshaped[mask_flat > 0, :]
+    
+    # Return as (n_timepoints, n_voxels)
+    return masked_voxels.T
 
 
 def find_gm_mask_file(participant_id: str, condition: str, data_dir: str) -> str:
@@ -209,63 +329,31 @@ def load_censoring_vector(participant_id: str, condition: str, data_dir: str, n_
     return censor_mask
 
 
-def apply_gm_mask_and_extract_timeseries(nifti_file: str, participant_id: str, 
-                                         condition: str, data_dir: str,
-                                         apply_censoring: bool = False) -> np.ndarray:
+def apply_censoring_to_timeseries(timeseries: np.ndarray, participant_id: str,
+                                   condition: str, data_dir: str) -> np.ndarray:
     """
-    Apply grey matter mask and extract time series from all voxels in the mask.
-    
-    Optionally applies censoring to remove timepoints marked as 0 in the censoring vector.
+    Apply censoring to time series data.
     
     Parameters
     ----------
-    nifti_file : str
-        Path to input nifti file
+    timeseries : np.ndarray
+        Time series matrix of shape (n_timepoints, n_voxels)
     participant_id : str
-        Participant identifier (for finding participant-specific GM mask)
+        Participant identifier
     condition : str
-        Condition name (for finding participant-specific GM mask and censoring vector)
+        Condition name
     data_dir : str
-        Directory containing the mask and censoring files
-    apply_censoring : bool, optional
-        If True, apply censoring to the time series (default: False)
+        Directory containing censoring file
     
     Returns
     -------
     np.ndarray
-        Time series matrix of shape (n_timepoints, n_voxels_in_mask) or 
-        (n_timepoints_after_censoring, n_voxels_in_mask) if censoring is applied
+        Censored time series of shape (n_timepoints_kept, n_voxels)
     """
-    # Load the nifti file
-    img = nib.load(nifti_file)
-    data = img.get_fdata()
-    
-    # Find and load the participant-specific grey matter mask
-    gm_mask_file = find_gm_mask_file(participant_id, condition, data_dir)
-    mask_img = nib.load(gm_mask_file)
-    mask = mask_img.get_fdata()
-    
-    # Handle 4D data (time series)
-    if data.ndim == 4:
-        n_timepoints = data.shape[3]
-        # Flatten spatial dimensions
-        data_reshaped = data.reshape(-1, n_timepoints)
-        mask_flat = mask.flatten()
-        
-        # Extract voxels where mask > 0
-        masked_voxels = data_reshaped[mask_flat > 0, :]
-        # Return as (n_timepoints, n_voxels)
-        timeseries = masked_voxels.T
-        
-        # Apply censoring if requested
-        if apply_censoring:
-            censor_mask = load_censoring_vector(participant_id, condition, data_dir, n_timepoints)
-            # Keep only non-censored timepoints
-            timeseries = timeseries[censor_mask, :]
-        
-        return timeseries
-    else:
-        raise ValueError(f"Expected 4D nifti file with time dimension, got shape {data.shape}")
+    n_timepoints = timeseries.shape[0]
+    censor_mask = load_censoring_vector(participant_id, condition, data_dir, n_timepoints)
+    # Keep only non-censored timepoints
+    return timeseries[censor_mask, :]
 
 
 def calculate_fc_matrix(timeseries: np.ndarray) -> np.ndarray:
@@ -403,34 +491,42 @@ def process_participant(participant_id: str, data_dir: str,
         participant_id, data_dir, treatment_condition, control_condition
     )
     
-    # Step 2: Downsample nifti files
+    # Find mask files
+    treatment_mask_file = find_gm_mask_file(participant_id, treatment_condition, data_dir)
+    control_mask_file = find_gm_mask_file(participant_id, control_condition, data_dir)
+    
+    # Step 2: Downsample nifti files and masks
     print(f"  Downsampling to {target_resolution}x{target_resolution}x{target_resolution} mm³...")
     treatment_downsampled = downsample_nifti(treatment_file, target_resolution)
     control_downsampled = downsample_nifti(control_file, target_resolution)
+    treatment_mask_downsampled = downsample_mask(treatment_mask_file, target_resolution)
+    control_mask_downsampled = downsample_mask(control_mask_file, target_resolution)
     
-    # Note: For now, we work with the raw downsampled data
-    # In a more complete implementation, you might save these and reload them
-    # For the mask application to work correctly in future BIDS implementation
+    # Step 3: Apply masks and extract time series from downsampled data
+    print(f"  Applying downsampled grey matter masks and extracting time series...")
+    treatment_timeseries = apply_downsampled_mask_and_extract_timeseries(
+        treatment_downsampled, treatment_mask_downsampled
+    )
+    control_timeseries = apply_downsampled_mask_and_extract_timeseries(
+        control_downsampled, control_mask_downsampled
+    )
     
-    # Step 3: Apply mask and extract time series
-    print(f"  Applying grey matter mask and extracting time series...")
+    # Step 4: Apply censoring if requested
     if apply_censoring:
-        print(f"    (Censoring enabled)")
-    treatment_timeseries = apply_gm_mask_and_extract_timeseries(
-        treatment_file, participant_id, treatment_condition, data_dir,
-        apply_censoring=apply_censoring
-    )
-    control_timeseries = apply_gm_mask_and_extract_timeseries(
-        control_file, participant_id, control_condition, data_dir,
-        apply_censoring=apply_censoring
-    )
+        print(f"  Applying censoring...")
+        treatment_timeseries = apply_censoring_to_timeseries(
+            treatment_timeseries, participant_id, treatment_condition, data_dir
+        )
+        control_timeseries = apply_censoring_to_timeseries(
+            control_timeseries, participant_id, control_condition, data_dir
+        )
     
-    # Step 4: Calculate FC matrices
+    # Step 5: Calculate FC matrices
     print(f"  Calculating functional connectivity matrices...")
     treatment_fc = calculate_fc_matrix(treatment_timeseries)
     control_fc = calculate_fc_matrix(control_timeseries)
     
-    # Step 5: Calculate FC change
+    # Step 6: Calculate FC change
     print(f"  Computing FC change (treatment - control)...")
     fc_change = calculate_fc_change(treatment_fc, control_fc)
     

@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="wholebrainISFC",
     version="0.1.0",
-    author="Your Name",
+    author="James Bartolotti",
     description="A library for preprocessing and analyzing whole-brain intrinsic functional connectivity fMRI data",
     long_description=long_description,
     long_description_content_type="text/markdown",
