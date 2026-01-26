@@ -538,6 +538,36 @@ def debug_timeseries_nan(timeseries: np.ndarray, condition_name: str = "") -> No
             print(f"      {p}th percentile: {val:.0f} NaN timepoints")
 
 
+def save_zero_variance_mask(timeseries: np.ndarray, global_mask: np.ndarray,
+                            output_file: str, mask_affine: np.ndarray | None,
+                            target_resolution: float, condition_name: str = "") -> None:
+    """Create and save a mask of zero-variance voxels aligned to the global mask."""
+    n_timepoints, n_voxels = timeseries.shape
+    stds = np.nanstd(timeseries, axis=0)
+    zero_var = (stds == 0) | np.isnan(stds)
+    n_zero = int(np.sum(zero_var))
+    n_valid = n_voxels - n_zero
+
+    print(f"    {condition_name}: valid voxels {n_valid}, zero-variance voxels {n_zero} ({100*n_zero/n_voxels:.2f}%)")
+
+    # Map to 3D using global mask
+    zero_mask_3d = np.zeros(global_mask.shape, dtype=np.uint8)
+    mask_indices = global_mask.flatten() > 0
+    zero_mask_3d.flat[mask_indices] = zero_var.astype(np.uint8)
+
+    # Choose affine
+    if mask_affine is not None:
+        affine = mask_affine
+    else:
+        affine = np.eye(4)
+        affine[0, 0] = target_resolution
+        affine[1, 1] = target_resolution
+        affine[2, 2] = target_resolution
+
+    nib.save(nib.Nifti1Image(zero_mask_3d, affine), output_file)
+    print(f"    Zero-variance mask saved to: {output_file}")
+
+
 def calculate_fc_matrix(timeseries: np.ndarray, debug: bool = False, 
                         condition_name: str = "") -> np.ndarray:
     """
@@ -595,6 +625,7 @@ def pearson_correlation_matrix(timeseries: np.ndarray, debug: bool = False) -> n
     # Find which voxels are valid (not all NaN)
     valid_voxels = ~np.all(np.isnan(timeseries), axis=0)
     n_valid = np.sum(valid_voxels)
+    print(f"    Number of valid voxels: {n_valid} out of {n_voxels} ({100*n_valid/n_voxels:.2f}%)")
     
     if n_valid == 0:
         # No valid voxels - return all NaN
@@ -854,7 +885,8 @@ def process_participant(participant_id: str, data_dir: str,
                         global_mask: np.ndarray,
                         target_resolution: float = 6.0,
                         apply_censoring: bool = False,
-                        debug: bool = False) -> tuple:
+                        debug: bool = False,
+                        mask_affine: np.ndarray | None = None) -> tuple:
     """
     Complete processing pipeline for a single participant.
     
@@ -882,6 +914,8 @@ def process_participant(participant_id: str, data_dir: str,
         If True, apply censoring to time series before FC calculation (default: False)
     debug : bool, optional
         If True, print debugging information about NaN values in timeseries (default: False)
+    mask_affine : np.ndarray, optional
+        Affine to use for any debug mask outputs to ensure alignment
     
     Returns
     -------
@@ -925,6 +959,15 @@ def process_participant(participant_id: str, data_dir: str,
         control_timeseries = apply_censoring_to_timeseries(
             control_timeseries, participant_id, control_condition, data_dir
         )
+
+    # Debug: save zero-variance voxel masks
+    if debug:
+        tz_mask_path = os.path.join(data_dir, f"{participant_id}_{treatment_condition}_zero_var_mask.nii")
+        cz_mask_path = os.path.join(data_dir, f"{participant_id}_{control_condition}_zero_var_mask.nii")
+        save_zero_variance_mask(treatment_timeseries, global_mask, tz_mask_path,
+                                mask_affine, target_resolution, condition_name="Treatment")
+        save_zero_variance_mask(control_timeseries, global_mask, cz_mask_path,
+                                mask_affine, target_resolution, condition_name="Control")
     
     # Step 5: Calculate FC matrices
     print(f"  Calculating functional connectivity matrices...")
