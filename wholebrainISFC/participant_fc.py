@@ -687,6 +687,91 @@ def create_mean_fc_change_map(fc_change: np.ndarray, global_mask: np.ndarray,
     return mean_fc_3d
 
 
+def save_fc_matrices_as_nifti(treatment_fc: np.ndarray, control_fc: np.ndarray,
+                               fc_change: np.ndarray, global_mask: np.ndarray,
+                               output_file: str, target_resolution: float = 6.0,
+                               mask_affine: np.ndarray | None = None) -> None:
+    """
+    Save all three FC matrices (treatment, control, change) as a 4D NIfTI file.
+    
+    Creates a 4D NIfTI where each of the three volumes represents one FC matrix:
+    - Volume 0: FC change (treatment - control)
+    - Volume 1: Treatment FC
+    - Volume 2: Control FC
+    
+    Parameters
+    ----------
+    treatment_fc : np.ndarray
+        NxN treatment FC matrix (already Fisher Z-transformed)
+    control_fc : np.ndarray
+        NxN control FC matrix (already Fisher Z-transformed)
+    fc_change : np.ndarray
+        NxN FC change matrix
+    global_mask : np.ndarray
+        3D global mask indicating which voxels are included
+    output_file : str
+        Path to save the output 4D NIfTI file
+    target_resolution : float
+        Voxel resolution in mm (for constructing affine matrix if none provided)
+    mask_affine : np.ndarray, optional
+        Affine to use for the output nifti. If None, a simple diagonal affine
+        using target_resolution is created.
+    """
+    # Helper function to reshape FC matrix to 3D using global mask
+    def reshape_fc_to_3d(fc_matrix: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        n_voxels = fc_matrix.shape[0]
+        result_3d = np.full(mask.shape, np.nan)
+        mask_indices = mask.flatten() > 0
+        result_3d.flat[mask_indices] = np.arange(n_voxels)
+        
+        # Create a 3D array where each voxel contains its index
+        voxel_indices = result_3d.copy()
+        
+        # Now create the output 3D array with mean FC values for visualization
+        output_3d = np.full(mask.shape, np.nan)
+        
+        # For each voxel, store the mean of its correlations (upper triangle)
+        valid_mask = voxel_indices >= 0
+        for i in range(n_voxels):
+            row_values = fc_matrix[i, i+1:]
+            col_values = fc_matrix[:i, i]
+            all_values = np.concatenate([row_values, col_values])
+            if len(all_values) > 0:
+                mean_val = np.nanmean(all_values)
+                output_3d[voxel_indices == i] = mean_val
+        
+        return output_3d
+    
+    # Reshape each FC matrix to 3D
+    fc_change_3d = reshape_fc_to_3d(fc_change, global_mask)
+    treatment_fc_3d = reshape_fc_to_3d(treatment_fc, global_mask)
+    control_fc_3d = reshape_fc_to_3d(control_fc, global_mask)
+    
+    # Stack into 4D array: (x, y, z, 3)
+    data_4d = np.stack([fc_change_3d, treatment_fc_3d, control_fc_3d], axis=3)
+    
+    # Choose affine
+    if mask_affine is not None:
+        affine = mask_affine
+    else:
+        affine = np.eye(4)
+        affine[0, 0] = target_resolution
+        affine[1, 1] = target_resolution
+        affine[2, 2] = target_resolution
+    
+    # Save as 4D NIfTI
+    img = nib.Nifti1Image(data_4d, affine)
+    nib.save(img, output_file)
+    
+    print(f"  4D FC matrices saved to: {output_file}")
+    print(f"    Shape: {data_4d.shape}")
+    print(f"    Volume 0 (FC Change): mean={np.nanmean(fc_change_3d):.6f}, range=[{np.nanmin(fc_change_3d):.6f}, {np.nanmax(fc_change_3d):.6f}]")
+    print(f"    Volume 1 (Treatment FC): mean={np.nanmean(treatment_fc_3d):.6f}, range=[{np.nanmin(treatment_fc_3d):.6f}, {np.nanmax(treatment_fc_3d):.6f}]")
+    print(f"    Volume 2 (Control FC): mean={np.nanmean(control_fc_3d):.6f}, range=[{np.nanmin(control_fc_3d):.6f}, {np.nanmax(control_fc_3d):.6f}]")
+    
+    return None
+
+
 def process_participant(participant_id: str, data_dir: str,
                         treatment_condition: str, control_condition: str,
                         global_mask: np.ndarray,
