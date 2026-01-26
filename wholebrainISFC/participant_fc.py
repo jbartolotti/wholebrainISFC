@@ -482,7 +482,64 @@ def apply_censoring_to_timeseries(timeseries: np.ndarray, participant_id: str,
     return timeseries[censor_mask, :]
 
 
-def calculate_fc_matrix(timeseries: np.ndarray) -> np.ndarray:
+def debug_timeseries_nan(timeseries: np.ndarray, condition_name: str = "") -> None:
+    """
+    Debug function to analyze NaN values in timeseries data.
+    
+    Prints information about which voxels contain NaN values and how many.
+    
+    Parameters
+    ----------
+    timeseries : np.ndarray
+        Time series matrix of shape (n_timepoints, n_voxels)
+    condition_name : str, optional
+        Name of the condition for output labeling
+    """
+    n_timepoints, n_voxels = timeseries.shape
+    
+    # Count NaN values per voxel
+    nan_counts = np.sum(np.isnan(timeseries), axis=0)
+    
+    # Find voxels with at least one NaN
+    voxels_with_nan = np.where(nan_counts > 0)[0]
+    n_affected = len(voxels_with_nan)
+    
+    print(f"\n  NaN Analysis for {condition_name}:")
+    print(f"    Total voxels: {n_voxels}")
+    print(f"    Total timepoints: {n_timepoints}")
+    print(f"    Voxels with at least one NaN: {n_affected} ({100*n_affected/n_voxels:.2f}%)")
+    
+    if n_affected == 0:
+        print(f"    ✓ No NaN values found - timeseries is clean")
+        return
+    
+    if n_affected <= 20:
+        # Few affected voxels - print details for each
+        print(f"\n    Details for affected voxels:")
+        for voxel_idx in voxels_with_nan:
+            n_nan = nan_counts[voxel_idx]
+            pct = 100 * n_nan / n_timepoints
+            print(f"      Voxel {voxel_idx:5d}: {n_nan:4d} NaN timepoints ({pct:.1f}%)")
+    else:
+        # Many affected voxels - print summary statistics
+        print(f"\n    Summary statistics for NaN counts:")
+        print(f"      Min NaN per voxel:  {np.min(nan_counts[nan_counts > 0]):d}")
+        print(f"      Max NaN per voxel:  {np.max(nan_counts):.0f}")
+        print(f"      Mean NaN per voxel: {np.mean(nan_counts[nan_counts > 0]):.1f}")
+        print(f"      Median NaN per voxel: {np.median(nan_counts[nan_counts > 0]):.1f}")
+        print(f"      Total NaN values:   {np.sum(nan_counts)}")
+        
+        # Show distribution
+        print(f"\n    Distribution of NaN counts:")
+        percentiles = [10, 25, 50, 75, 90, 95, 99]
+        nan_counts_affected = nan_counts[nan_counts > 0]
+        for p in percentiles:
+            val = np.percentile(nan_counts_affected, p)
+            print(f"      {p}th percentile: {val:.0f} NaN timepoints")
+
+
+def calculate_fc_matrix(timeseries: np.ndarray, debug: bool = False, 
+                        condition_name: str = "") -> np.ndarray:
     """
     Calculate functional connectivity matrix using Pearson correlation.
     
@@ -493,12 +550,19 @@ def calculate_fc_matrix(timeseries: np.ndarray) -> np.ndarray:
     ----------
     timeseries : np.ndarray
         Time series matrix of shape (n_timepoints, n_voxels)
+    debug : bool, optional
+        If True, print debugging information about NaN values
+    condition_name : str, optional
+        Name of condition for debug output
     
     Returns
     -------
     np.ndarray
         NxN functional connectivity matrix with Fisher's Z-transformed values
     """
+    if debug:
+        debug_timeseries_nan(timeseries, condition_name)
+    
     # Calculate Pearson correlation matrix
     corr_matrix = pearson_correlation_matrix(timeseries)
     
@@ -776,7 +840,8 @@ def process_participant(participant_id: str, data_dir: str,
                         treatment_condition: str, control_condition: str,
                         global_mask: np.ndarray,
                         target_resolution: float = 6.0,
-                        apply_censoring: bool = False) -> tuple:
+                        apply_censoring: bool = False,
+                        debug: bool = False) -> tuple:
     """
     Complete processing pipeline for a single participant.
     
@@ -802,6 +867,8 @@ def process_participant(participant_id: str, data_dir: str,
         Target voxel resolution in mm (default 6.0)
     apply_censoring : bool, optional
         If True, apply censoring to time series before FC calculation (default: False)
+    debug : bool, optional
+        If True, print debugging information about NaN values in timeseries (default: False)
     
     Returns
     -------
@@ -848,8 +915,10 @@ def process_participant(participant_id: str, data_dir: str,
     
     # Step 5: Calculate FC matrices
     print(f"  Calculating functional connectivity matrices...")
-    treatment_fc = calculate_fc_matrix(treatment_timeseries)
-    control_fc = calculate_fc_matrix(control_timeseries)
+    treatment_fc = calculate_fc_matrix(treatment_timeseries, debug=debug, 
+                                      condition_name=f"{participant_id} {treatment_condition}")
+    control_fc = calculate_fc_matrix(control_timeseries, debug=debug,
+                                    condition_name=f"{participant_id} {control_condition}")
     
     # Step 6: Calculate FC change
     print(f"  Computing FC change (treatment - control)...")
