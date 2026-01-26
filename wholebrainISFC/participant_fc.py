@@ -82,6 +82,9 @@ def downsample_nifti(nifti_file: str, target_resolution: float = 6.0) -> np.ndar
     """
     Downsample nifti file to target resolution (e.g., 6x6x6 mm³ from 3mm³).
     
+    Caches downsampled files with target resolution in filename. If cached file exists,
+    loads it instead of re-downsampling.
+    
     Parameters
     ----------
     nifti_file : str
@@ -94,7 +97,20 @@ def downsample_nifti(nifti_file: str, target_resolution: float = 6.0) -> np.ndar
     np.ndarray
         Downsampled image data
     """
-    # Load the nifti file
+    # Generate cached filename with resolution suffix
+    base_path, ext = os.path.splitext(nifti_file)
+    if ext == '.gz':
+        base_path, ext2 = os.path.splitext(base_path)
+        ext = ext2 + ext
+    cached_file = f"{base_path}_{int(target_resolution)}mm{ext}"
+    
+    # Check if cached downsampled file exists
+    if os.path.exists(cached_file):
+        print(f"    Loading cached downsampled file: {os.path.basename(cached_file)}")
+        img = nib.load(cached_file)
+        return img.get_fdata()
+    
+    # Load the original nifti file
     img = nib.load(nifti_file)
     data = img.get_fdata()
     affine = img.affine
@@ -113,7 +129,17 @@ def downsample_nifti(nifti_file: str, target_resolution: float = 6.0) -> np.ndar
         scaling_factors = spatial_scaling
     
     # Downsample using scipy zoom with linear interpolation for continuous data
+    print(f"    Downsampling and caching: {os.path.basename(cached_file)}")
     downsampled = zoom(data, scaling_factors, order=1)
+    
+    # Save the downsampled data for future use
+    # Create new affine matrix with updated voxel dimensions
+    new_affine = affine.copy()
+    for i in range(3):
+        new_affine[:3, i] = affine[:3, i] * (1.0 / spatial_scaling[i])
+    
+    downsampled_img = nib.Nifti1Image(downsampled, new_affine)
+    nib.save(downsampled_img, cached_file)
     
     return downsampled
 
@@ -124,6 +150,7 @@ def downsample_mask(mask_file: str, target_resolution: float = 6.0) -> np.ndarra
     
     Uses nearest-neighbor interpolation to preserve binary nature of mask.
     Handles both 3D mask files and 4D files (takes mean across time for 4D).
+    Caches downsampled masks with target resolution in filename.
     
     Parameters
     ----------
@@ -137,6 +164,19 @@ def downsample_mask(mask_file: str, target_resolution: float = 6.0) -> np.ndarra
     np.ndarray
         3D downsampled mask data
     """
+    # Generate cached filename with resolution suffix
+    base_path, ext = os.path.splitext(mask_file)
+    if ext == '.gz':
+        base_path, ext2 = os.path.splitext(base_path)
+        ext = ext2 + ext
+    cached_file = f"{base_path}_{int(target_resolution)}mm{ext}"
+    
+    # Check if cached downsampled file exists
+    if os.path.exists(cached_file):
+        print(f"    Loading cached downsampled mask: {os.path.basename(cached_file)}")
+        img = nib.load(cached_file)
+        return img.get_fdata()
+    
     # Load the mask file
     img = nib.load(mask_file)
     data = img.get_fdata()
@@ -161,7 +201,17 @@ def downsample_mask(mask_file: str, target_resolution: float = 6.0) -> np.ndarra
     spatial_scaling = voxel_dims / target_resolution
     
     # Downsample using nearest neighbor (order=0) for masks to preserve binary structure
+    print(f"    Downsampling and caching mask: {os.path.basename(cached_file)}")
     downsampled = zoom(data, spatial_scaling, order=0)
+    
+    # Save the downsampled mask for future use
+    # Create new affine matrix with updated voxel dimensions
+    new_affine = affine.copy()
+    for i in range(3):
+        new_affine[:3, i] = affine[:3, i] * (1.0 / spatial_scaling[i])
+    
+    downsampled_img = nib.Nifti1Image(downsampled, new_affine)
+    nib.save(downsampled_img, cached_file)
     
     return downsampled
 
@@ -561,7 +611,7 @@ def process_participant(participant_id: str, data_dir: str,
                         treatment_condition: str, control_condition: str,
                         global_mask: np.ndarray,
                         target_resolution: float = 6.0,
-                        apply_censoring: bool = False) -> np.ndarray:
+                        apply_censoring: bool = False) -> tuple:
     """
     Complete processing pipeline for a single participant.
     
@@ -590,8 +640,9 @@ def process_participant(participant_id: str, data_dir: str,
     
     Returns
     -------
-    np.ndarray
-        FC change matrix for the participant (may contain NaN for invalid voxels)
+    tuple
+        (treatment_fc, control_fc, fc_change) - FC matrices for treatment and control conditions,
+        and their difference (all may contain NaN for invalid voxels)
     """
     # Step 1: Validate input data
     print(f"Processing participant {participant_id}...")
@@ -641,4 +692,4 @@ def process_participant(participant_id: str, data_dir: str,
     
     print(f"  Completed processing for participant {participant_id}")
     
-    return fc_change
+    return treatment_fc, control_fc, fc_change
