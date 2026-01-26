@@ -564,7 +564,7 @@ def calculate_fc_matrix(timeseries: np.ndarray, debug: bool = False,
         debug_timeseries_nan(timeseries, condition_name)
     
     # Calculate Pearson correlation matrix
-    corr_matrix = pearson_correlation_matrix(timeseries)
+    corr_matrix = pearson_correlation_matrix(timeseries, debug=debug)
     
     # Apply Fisher's Z transformation
     z_matrix = fishers_z_transform(corr_matrix)
@@ -572,7 +572,7 @@ def calculate_fc_matrix(timeseries: np.ndarray, debug: bool = False,
     return z_matrix
 
 
-def pearson_correlation_matrix(timeseries: np.ndarray) -> np.ndarray:
+def pearson_correlation_matrix(timeseries: np.ndarray, debug: bool = False) -> np.ndarray:
     """
     Calculate Pearson correlation matrix between all voxel time series.
     
@@ -606,7 +606,20 @@ def pearson_correlation_matrix(timeseries: np.ndarray) -> np.ndarray:
     # Standardize (zero mean, unit variance)
     means = np.mean(ts_valid, axis=0)
     stds = np.std(ts_valid, axis=0)
-    ts_standardized = (ts_valid - means) / stds
+
+    # Detect zero-variance voxels to avoid divide-by-zero and track impact
+    zero_var_mask = stds == 0
+    n_zero_var = int(np.sum(zero_var_mask))
+    if debug and n_zero_var > 0:
+        if n_zero_var <= 20:
+            zero_idxs = np.where(valid_voxels)[0][zero_var_mask]
+            print(f"    Zero-variance voxels: {n_zero_var} -> {zero_idxs}")
+        else:
+            print(f"    Zero-variance voxels: {n_zero_var} ({100*n_zero_var/n_valid:.2f}%)")
+
+    stds_safe = stds.copy()
+    stds_safe[zero_var_mask] = np.nan  # ensures division yields NaN without warnings
+    ts_standardized = (ts_valid - means) / stds_safe
     
     # Fast matrix multiplication: (1/N) * X^T * X where X is standardized
     n_timepoints = ts_valid.shape[0]
