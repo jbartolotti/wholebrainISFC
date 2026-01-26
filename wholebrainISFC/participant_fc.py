@@ -120,31 +120,44 @@ def downsample_nifti(nifti_file: str, target_resolution: float = 6.0) -> np.ndar
 
 def downsample_mask(mask_file: str, target_resolution: float = 6.0) -> np.ndarray:
     """
-    Downsample a 3D mask to match target resolution.
+    Downsample a mask to match target resolution.
     
     Uses nearest-neighbor interpolation to preserve binary nature of mask.
+    Handles both 3D mask files and 4D files (takes mean across time for 4D).
     
     Parameters
     ----------
     mask_file : str
-        Path to mask file
+        Path to mask file (can be 3D or 4D)
     target_resolution : float
         Target voxel resolution in mm (default 6.0 for 6x6x6 mm³)
     
     Returns
     -------
     np.ndarray
-        Downsampled mask data
+        3D downsampled mask data
     """
     # Load the mask file
     img = nib.load(mask_file)
     data = img.get_fdata()
     affine = img.affine
     
+    # Handle 4D data by taking mean across time and thresholding
+    if data.ndim == 4:
+        print(f"  Note: Mask file is 4D (shape: {data.shape}). Taking mean across time dimension.")
+        data = np.mean(data, axis=3)
+        # Create binary mask from mean
+        data = (data > 0).astype(np.float32)
+    elif data.ndim == 3:
+        # Already 3D, ensure it's in the right format
+        data = data.astype(np.float32)
+    else:
+        raise ValueError(f"Expected 3D or 4D mask file, got shape: {data.shape}")
+    
     # Get current voxel dimensions
     voxel_dims = np.array([np.linalg.norm(affine[:3, i]) for i in range(3)])
     
-    # Calculate scaling factors
+    # Calculate scaling factors for 3D data
     spatial_scaling = voxel_dims / target_resolution
     
     # Downsample using nearest neighbor (order=0) for masks to preserve binary structure
