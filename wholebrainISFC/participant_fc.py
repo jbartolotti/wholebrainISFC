@@ -607,8 +607,9 @@ def calculate_fc_change(treatment_fc: np.ndarray, control_fc: np.ndarray) -> np.
     return fc_change
 
 
-def create_mean_fc_change_map(fc_change: np.ndarray, global_mask: np.ndarray, 
-                               output_file: str, target_resolution: float = 6.0) -> np.ndarray:
+def create_mean_fc_change_map(fc_change: np.ndarray, global_mask: np.ndarray,
+                               output_file: str, target_resolution: float = 6.0,
+                               mask_affine: np.ndarray | None = None) -> np.ndarray:
     """
     Create a 3D nifti map of mean FC change values for each voxel.
     
@@ -625,7 +626,11 @@ def create_mean_fc_change_map(fc_change: np.ndarray, global_mask: np.ndarray,
     output_file : str
         Path to save the output nifti file
     target_resolution : float
-        Voxel resolution in mm (for constructing affine matrix)
+        Voxel resolution in mm (for constructing affine matrix if none provided)
+    mask_affine : np.ndarray, optional
+        Affine to use for the output nifti. If None, a simple diagonal affine
+        using target_resolution is created. Providing the affine from the
+        downsampled global mask ensures spatial alignment with other files.
     
     Returns
     -------
@@ -659,12 +664,14 @@ def create_mean_fc_change_map(fc_change: np.ndarray, global_mask: np.ndarray,
     mask_indices = global_mask.flatten() > 0
     mean_fc_3d.flat[mask_indices] = mean_fc_change
     
-    # Create affine matrix for the nifti file
-    # Simple affine with target resolution and no rotation
-    affine = np.eye(4)
-    affine[0, 0] = target_resolution
-    affine[1, 1] = target_resolution
-    affine[2, 2] = target_resolution
+    # Choose affine: prefer provided mask_affine for spatial alignment
+    if mask_affine is not None:
+        affine = mask_affine
+    else:
+        affine = np.eye(4)
+        affine[0, 0] = target_resolution
+        affine[1, 1] = target_resolution
+        affine[2, 2] = target_resolution
     
     # Save as nifti file
     img = nib.Nifti1Image(mean_fc_3d, affine)
