@@ -607,6 +607,79 @@ def calculate_fc_change(treatment_fc: np.ndarray, control_fc: np.ndarray) -> np.
     return fc_change
 
 
+def create_mean_fc_change_map(fc_change: np.ndarray, global_mask: np.ndarray, 
+                               output_file: str, target_resolution: float = 6.0) -> np.ndarray:
+    """
+    Create a 3D nifti map of mean FC change values for each voxel.
+    
+    For each voxel, calculates the mean of its FC change values with all other
+    voxels (using upper triangle of the FC matrix to avoid double-counting).
+    The FC change matrix is already in Fisher's Z space.
+    
+    Parameters
+    ----------
+    fc_change : np.ndarray
+        NxN FC change matrix (already Fisher Z-transformed)
+    global_mask : np.ndarray
+        3D global mask indicating which voxels are included
+    output_file : str
+        Path to save the output nifti file
+    target_resolution : float
+        Voxel resolution in mm (for constructing affine matrix)
+    
+    Returns
+    -------
+    np.ndarray
+        3D array with mean FC change value for each voxel
+    """
+    # Get the upper triangle indices (excluding diagonal)
+    n_voxels = fc_change.shape[0]
+    upper_tri_indices = np.triu_indices(n_voxels, k=1)
+    
+    # Initialize array to hold mean values for each voxel
+    mean_fc_change = np.full(n_voxels, np.nan)
+    
+    # For each voxel, calculate mean of its correlations with other voxels
+    # Using upper triangle to avoid double-counting
+    for i in range(n_voxels):
+        # Get all connections for this voxel from upper triangle
+        # Voxel i appears in row i (columns > i) and column i (rows < i)
+        row_values = fc_change[i, i+1:]  # Values where i is the row
+        col_values = fc_change[:i, i]     # Values where i is the column
+        
+        # Combine all values for this voxel
+        all_values = np.concatenate([row_values, col_values])
+        
+        # Calculate mean, ignoring NaN values
+        if len(all_values) > 0:
+            mean_fc_change[i] = np.nanmean(all_values)
+    
+    # Reshape mean values back to 3D space using global mask
+    mean_fc_3d = np.full(global_mask.shape, np.nan)
+    mask_indices = global_mask.flatten() > 0
+    mean_fc_3d.flat[mask_indices] = mean_fc_change
+    
+    # Create affine matrix for the nifti file
+    # Simple affine with target resolution and no rotation
+    affine = np.eye(4)
+    affine[0, 0] = target_resolution
+    affine[1, 1] = target_resolution
+    affine[2, 2] = target_resolution
+    
+    # Save as nifti file
+    img = nib.Nifti1Image(mean_fc_3d, affine)
+    nib.save(img, output_file)
+    
+    print(f"  Mean FC change map saved to: {output_file}")
+    print(f"    Shape: {mean_fc_3d.shape}")
+    print(f"    Valid voxels: {np.sum(~np.isnan(mean_fc_3d))}")
+    print(f"    Mean: {np.nanmean(mean_fc_3d):.6f}")
+    print(f"    Std: {np.nanstd(mean_fc_3d):.6f}")
+    print(f"    Range: [{np.nanmin(mean_fc_3d):.6f}, {np.nanmax(mean_fc_3d):.6f}]")
+    
+    return mean_fc_3d
+
+
 def process_participant(participant_id: str, data_dir: str,
                         treatment_condition: str, control_condition: str,
                         global_mask: np.ndarray,
