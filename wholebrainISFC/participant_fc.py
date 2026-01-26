@@ -307,7 +307,8 @@ def create_global_mask(participant_ids: list, conditions: list, data_dir: str,
 
 def apply_global_and_individual_mask(downsampled_data: np.ndarray,
                                      global_mask: np.ndarray,
-                                     individual_mask: np.ndarray) -> np.ndarray:
+                                     individual_mask: np.ndarray,
+                                     debug: bool = False) -> np.ndarray:
     """
     Extract time series using global mask, filling invalid voxels with NaN.
     
@@ -322,6 +323,8 @@ def apply_global_and_individual_mask(downsampled_data: np.ndarray,
         3D global mask covering all participants/conditions
     individual_mask : np.ndarray
         3D individual mask for this specific participant/condition
+    debug : bool, optional
+        If True, print shape diagnostics
     
     Returns
     -------
@@ -335,10 +338,27 @@ def apply_global_and_individual_mask(downsampled_data: np.ndarray,
     
     n_timepoints = downsampled_data.shape[3]
     
-    # Flatten spatial dimensions
-    data_reshaped = downsampled_data.reshape(-1, n_timepoints)
-    global_mask_flat = global_mask.flatten()
-    individual_mask_flat = individual_mask.flatten()
+    if debug:
+        print(f"    DEBUG: downsampled_data shape: {downsampled_data.shape}")
+        print(f"    DEBUG: global_mask shape: {global_mask.shape}")
+        print(f"    DEBUG: individual_mask shape: {individual_mask.shape}")
+        print(f"    DEBUG: data spatial dims: {downsampled_data.shape[:3]}")
+        print(f"    DEBUG: mask spatial dims: {global_mask.shape}")
+        print(f"    DEBUG: spatial match: {downsampled_data.shape[:3] == global_mask.shape}")
+    
+    # Check for dimension mismatch
+    if downsampled_data.shape[:3] != global_mask.shape:
+        raise ValueError(f"Spatial dimensions mismatch! Data: {downsampled_data.shape[:3]}, "
+                        f"Global mask: {global_mask.shape}. This causes incorrect voxel mapping.")
+    
+    if downsampled_data.shape[:3] != individual_mask.shape:
+        raise ValueError(f"Spatial dimensions mismatch! Data: {downsampled_data.shape[:3]}, "
+                        f"Individual mask: {individual_mask.shape}. This causes incorrect voxel mapping.")
+    
+    # Flatten spatial dimensions explicitly with C-order for consistency
+    data_reshaped = downsampled_data.reshape(-1, n_timepoints, order='C')
+    global_mask_flat = global_mask.flatten(order='C')
+    individual_mask_flat = individual_mask.flatten(order='C')
     
     # Initialize output with NaN
     n_global_voxels = int(np.sum(global_mask_flat > 0))
@@ -944,10 +964,10 @@ def process_participant(participant_id: str, data_dir: str,
     # Step 3: Apply global and individual masks, extract time series (with NaN for invalid voxels)
     print(f"  Applying masks and extracting time series...")
     treatment_timeseries = apply_global_and_individual_mask(
-        treatment_downsampled, global_mask, treatment_mask_downsampled
+        treatment_downsampled, global_mask, treatment_mask_downsampled, debug=debug
     )
     control_timeseries = apply_global_and_individual_mask(
-        control_downsampled, global_mask, control_mask_downsampled
+        control_downsampled, global_mask, control_mask_downsampled, debug=debug
     )
     
     # Step 4: Apply censoring if requested
