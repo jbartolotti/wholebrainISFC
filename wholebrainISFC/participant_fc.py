@@ -10,496 +10,19 @@ This module handles processing individual participants' data including:
 """
 
 import os
-from typing import Tuple
+from typing import Optional
 import numpy as np
 import nibabel as nib
-from scipy.ndimage import zoom
 
-
-def validate_participant_data(participant_id: str, data_dir: str, 
-                              treatment_condition: str, 
-                              control_condition: str) -> Tuple[str, str]:
-    """
-    Confirm input data for a participant.
-    
-    Verifies that nifti files exist for both treatment and control conditions,
-    already warped to MNI template.
-    
-    Parameters
-    ----------
-    participant_id : str
-        Participant identifier
-    data_dir : str
-        Directory containing the brain nifti data
-    treatment_condition : str
-        Name of the treatment condition
-    control_condition : str
-        Name of the control condition
-    
-    Returns
-    -------
-    tuple
-        (treatment_file, control_file) paths to validated nifti files
-    
-    Raises
-    ------
-    FileNotFoundError
-        If required nifti files are not found
-    """
-    # Try both .nii and .nii.gz extensions
-    treatment_name = f"{participant_id}_{treatment_condition}"
-    control_name = f"{participant_id}_{control_condition}"
-    
-    treatment_file = None
-    control_file = None
-    
-    # Look for treatment file
-    for ext in ['.nii.gz', '.nii']:
-        candidate = os.path.join(data_dir, treatment_name + ext)
-        if os.path.exists(candidate):
-            treatment_file = candidate
-            break
-    
-    # Look for control file
-    for ext in ['.nii.gz', '.nii']:
-        candidate = os.path.join(data_dir, control_name + ext)
-        if os.path.exists(candidate):
-            control_file = candidate
-            break
-    
-    if treatment_file is None:
-        raise FileNotFoundError(f"Treatment condition file not found for participant {participant_id}: "
-                                f"expected {os.path.join(data_dir, treatment_name + '.[nii|nii.gz]')}")
-    
-    if control_file is None:
-        raise FileNotFoundError(f"Control condition file not found for participant {participant_id}: "
-                                f"expected {os.path.join(data_dir, control_name + '.[nii|nii.gz]')}")
-    
-    return treatment_file, control_file
-
-
-def downsample_nifti(nifti_file: str, target_resolution: float = 6.0) -> np.ndarray:
-    """
-    Downsample nifti file to target resolution (e.g., 6x6x6 mm³ from 3mm³).
-    
-    Caches downsampled files with target resolution in filename. If cached file exists,
-    loads it instead of re-downsampling.
-    
-    Parameters
-    ----------
-    nifti_file : str
-        Path to input nifti file
-    target_resolution : float
-        Target voxel resolution in mm (default 6.0 for 6x6x6 mm³)
-    
-    Returns
-    -------
-    np.ndarray
-        Downsampled image data
-    """
-    # Generate cached filename with resolution suffix
-    base_path, ext = os.path.splitext(nifti_file)
-    if ext == '.gz':
-        base_path, ext2 = os.path.splitext(base_path)
-        ext = ext2 + ext
-    cached_file = f"{base_path}_{int(target_resolution)}mm{ext}"
-    
-    # Check if cached downsampled file exists
-    if os.path.exists(cached_file):
-        print(f"    Loading cached downsampled file: {os.path.basename(cached_file)}")
-        img = nib.load(cached_file)
-        return img.get_fdata()
-    
-    # Load the original nifti file
-    img = nib.load(nifti_file)
-    data = img.get_fdata()
-    affine = img.affine
-    
-    # Get current voxel dimensions (spatial dimensions only)
-    voxel_dims = np.array([np.linalg.norm(affine[:3, i]) for i in range(3)])
-    
-    # Calculate scaling factors for spatial dimensions
-    spatial_scaling = voxel_dims / target_resolution
-    
-    # Create scaling factors for all dimensions
-    # For 4D data (x, y, z, time), we only downsample spatial dimensions, not time
-    if data.ndim == 4:
-        scaling_factors = list(spatial_scaling) + [1.0]  # Don't scale time dimension
-    else:
-        scaling_factors = spatial_scaling
-    
-    # Downsample using scipy zoom with linear interpolation for continuous data
-    print(f"    Downsampling and caching: {os.path.basename(cached_file)}")
-    downsampled = zoom(data, scaling_factors, order=1)
-    
-    # Save the downsampled data for future use
-    # Create new affine matrix with updated voxel dimensions
-    new_affine = affine.copy()
-    for i in range(3):
-        new_affine[:3, i] = affine[:3, i] * (1.0 / spatial_scaling[i])
-    
-    downsampled_img = nib.Nifti1Image(downsampled, new_affine)
-    nib.save(downsampled_img, cached_file)
-    
-    return downsampled
-
-
-def downsample_mask(mask_file: str, target_resolution: float = 6.0) -> np.ndarray:
-    """
-    Downsample a mask to match target resolution.
-    
-    Uses nearest-neighbor interpolation to preserve binary nature of mask.
-    Handles both 3D mask files and 4D files (takes mean across time for 4D).
-    Caches downsampled masks with target resolution in filename.
-    
-    Parameters
-    ----------
-    mask_file : str
-        Path to mask file (can be 3D or 4D)
-    target_resolution : float
-        Target voxel resolution in mm (default 6.0 for 6x6x6 mm³)
-    
-    Returns
-    -------
-    np.ndarray
-        3D downsampled mask data
-    """
-    # Generate cached filename with resolution suffix
-    base_path, ext = os.path.splitext(mask_file)
-    if ext == '.gz':
-        base_path, ext2 = os.path.splitext(base_path)
-        ext = ext2 + ext
-    cached_file = f"{base_path}_{int(target_resolution)}mm{ext}"
-    
-    # Check if cached downsampled file exists
-    if os.path.exists(cached_file):
-        print(f"    Loading cached downsampled mask: {os.path.basename(cached_file)}")
-        img = nib.load(cached_file)
-        return img.get_fdata()
-    
-    # Load the mask file
-    img = nib.load(mask_file)
-    data = img.get_fdata()
-    affine = img.affine
-    
-    # Handle 4D data by taking mean across time and thresholding
-    if data.ndim == 4:
-        print(f"  Note: Mask file is 4D (shape: {data.shape}). Taking mean across time dimension.")
-        data = np.mean(data, axis=3)
-        # Create binary mask from mean
-        data = (data > 0).astype(np.float32)
-    elif data.ndim == 3:
-        # Already 3D, ensure it's in the right format
-        data = data.astype(np.float32)
-    else:
-        raise ValueError(f"Expected 3D or 4D mask file, got shape: {data.shape}")
-    
-    # Get current voxel dimensions
-    voxel_dims = np.array([np.linalg.norm(affine[:3, i]) for i in range(3)])
-    
-    # Calculate scaling factors for 3D data
-    spatial_scaling = voxel_dims / target_resolution
-    
-    # Downsample using nearest neighbor (order=0) for masks to preserve binary structure
-    print(f"    Downsampling and caching mask: {os.path.basename(cached_file)}")
-    downsampled = zoom(data, spatial_scaling, order=0)
-    
-    # Save the downsampled mask for future use
-    # Create new affine matrix with updated voxel dimensions
-    new_affine = affine.copy()
-    for i in range(3):
-        new_affine[:3, i] = affine[:3, i] * (1.0 / spatial_scaling[i])
-    
-    downsampled_img = nib.Nifti1Image(downsampled, new_affine)
-    nib.save(downsampled_img, cached_file)
-    
-    return downsampled
-
-
-def apply_mask_and_extract_timeseries(nifti_file: str, mask_file: str) -> np.ndarray:
-    """
-    Apply grey matter mask and extract time series from all voxels in the mask.
-    
-    Masking is done at the original resolution to avoid edge artifacts from
-    resampling binary masks.
-    
-    Parameters
-    ----------
-    nifti_file : str
-        Path to input 4D nifti file
-    mask_file : str
-        Path to grey matter mask file
-    
-    Returns
-    -------
-    np.ndarray
-        Time series matrix of shape (n_timepoints, n_voxels_in_mask)
-    """
-    # Load the nifti file
-    img = nib.load(nifti_file)
-    data = img.get_fdata()
-    
-    # Load the mask
-    mask_img = nib.load(mask_file)
-    mask = mask_img.get_fdata()
-    
-    # Ensure data is 4D
-    if data.ndim != 4:
-        raise ValueError(f"Expected 4D nifti data with time dimension, got shape {data.shape}")
-    
-    n_timepoints = data.shape[3]
-    
-    # Flatten spatial dimensions
-    data_reshaped = data.reshape(-1, n_timepoints)
-    mask_flat = mask.flatten()
-    
-    # Extract voxels where mask > 0
-    masked_voxels = data_reshaped[mask_flat > 0, :]
-    
-    # Return as (n_timepoints, n_voxels)
-    return masked_voxels.T
-
-
-def create_global_mask(participant_ids: list, conditions: list, data_dir: str,
-                       target_resolution: float = 6.0) -> np.ndarray:
-    """
-    Create a global mask as the union (logical OR) of all individual masks.
-    
-    Parameters
-    ----------
-    participant_ids : list
-        List of participant identifiers
-    conditions : list
-        List of condition names
-    data_dir : str
-        Directory containing mask files
-    target_resolution : float
-        Target resolution for downsampling masks
-    
-    Returns
-    -------
-    np.ndarray
-        Global mask (3D array) with value 1 where any individual mask has data
-    """
-    global_mask = None
-    
-    for participant_id in participant_ids:
-        for condition in conditions:
-            try:
-                mask_file = find_gm_mask_file(participant_id, condition, data_dir)
-                downsampled_mask = downsample_mask(mask_file, target_resolution)
-                
-                if global_mask is None:
-                    # Initialize with first mask
-                    global_mask = (downsampled_mask > 0).astype(np.float32)
-                else:
-                    # Logical OR - union of all masks
-                    global_mask = np.logical_or(global_mask, downsampled_mask > 0).astype(np.float32)
-            except FileNotFoundError:
-                print(f"  Warning: Mask not found for {participant_id}, {condition}. Skipping.")
-                continue
-    
-    if global_mask is None:
-        raise ValueError("No valid masks found to create global mask")
-    
-    return global_mask
-
-
-def apply_global_and_individual_mask(downsampled_data: np.ndarray,
-                                     global_mask: np.ndarray,
-                                     individual_mask: np.ndarray,
-                                     debug: bool = False) -> np.ndarray:
-    """
-    Extract time series using global mask, filling invalid voxels with NaN.
-    
-    Extracts time series for all voxels in the global mask. For voxels that are
-    in the global mask but NOT in the individual mask, fills with np.nan.
-    
-    Parameters
-    ----------
-    downsampled_data : np.ndarray
-        Downsampled 4D functional data (x, y, z, time)
-    global_mask : np.ndarray
-        3D global mask covering all participants/conditions
-    individual_mask : np.ndarray
-        3D individual mask for this specific participant/condition
-    debug : bool, optional
-        If True, print shape diagnostics
-    
-    Returns
-    -------
-    np.ndarray
-        Time series matrix of shape (n_timepoints, n_global_voxels)
-        Invalid voxels filled with np.nan
-    """
-    # Ensure data is 4D
-    if downsampled_data.ndim != 4:
-        raise ValueError(f"Expected 4D nifti data with time dimension, got shape {downsampled_data.shape}")
-    
-    n_timepoints = downsampled_data.shape[3]
-    
-    if debug:
-        print(f"    DEBUG: downsampled_data shape: {downsampled_data.shape}")
-        print(f"    DEBUG: global_mask shape: {global_mask.shape}")
-        print(f"    DEBUG: individual_mask shape: {individual_mask.shape}")
-        print(f"    DEBUG: data spatial dims: {downsampled_data.shape[:3]}")
-        print(f"    DEBUG: mask spatial dims: {global_mask.shape}")
-        print(f"    DEBUG: spatial match: {downsampled_data.shape[:3] == global_mask.shape}")
-    
-    # Check for dimension mismatch
-    if downsampled_data.shape[:3] != global_mask.shape:
-        raise ValueError(f"Spatial dimensions mismatch! Data: {downsampled_data.shape[:3]}, "
-                        f"Global mask: {global_mask.shape}. This causes incorrect voxel mapping.")
-    
-    if downsampled_data.shape[:3] != individual_mask.shape:
-        raise ValueError(f"Spatial dimensions mismatch! Data: {downsampled_data.shape[:3]}, "
-                        f"Individual mask: {individual_mask.shape}. This causes incorrect voxel mapping.")
-    
-    # Flatten spatial dimensions explicitly with C-order for consistency
-    data_reshaped = downsampled_data.reshape(-1, n_timepoints, order='C')
-    global_mask_flat = global_mask.flatten(order='C')
-    individual_mask_flat = individual_mask.flatten(order='C')
-    
-    # Initialize output with NaN
-    n_global_voxels = int(np.sum(global_mask_flat > 0))
-    timeseries = np.full((n_timepoints, n_global_voxels), np.nan, dtype=np.float64)
-    
-    # Get indices for global mask voxels
-    global_indices = np.where(global_mask_flat > 0)[0]
-    
-    # For each global voxel, check if it's in individual mask
-    for i, global_idx in enumerate(global_indices):
-        if individual_mask_flat[global_idx] > 0:
-            # Valid voxel - extract actual time series
-            timeseries[:, i] = data_reshaped[global_idx, :]
-        # else: leave as NaN (already initialized)
-    
-    return timeseries
-
-
-def find_gm_mask_file(participant_id: str, condition: str, data_dir: str) -> str:
-    """
-    Find the participant-specific grey matter mask file.
-    
-    Looks for a file named {participant_id}_{condition}_GM.nii[.gz] in data_dir.
-    
-    Parameters
-    ----------
-    participant_id : str
-        Participant identifier
-    condition : str
-        Condition name
-    data_dir : str
-        Directory containing the mask file
-    
-    Returns
-    -------
-    str
-        Path to the grey matter mask file
-    
-    Raises
-    ------
-    FileNotFoundError
-        If the mask file is not found
-    """
-    gm_mask_name = f"{participant_id}_{condition}_GM"
-    
-    # Try both .nii.gz and .nii extensions
-    for ext in ['.nii.gz', '.nii']:
-        candidate = os.path.join(data_dir, gm_mask_name + ext)
-        if os.path.exists(candidate):
-            return candidate
-    
-    raise FileNotFoundError(f"Grey matter mask not found for participant {participant_id}, "
-                           f"condition {condition}: expected {os.path.join(data_dir, gm_mask_name + '.[nii|nii.gz]')}")
-
-
-def load_censoring_vector(participant_id: str, condition: str, data_dir: str, n_timepoints: int) -> np.ndarray:
-    """
-    Load censoring vector for a participant and condition.
-    
-    Looks for a file named {participant_id}_{condition}_censor.[1D|tsv|csv|txt] in data_dir.
-    
-    Parameters
-    ----------
-    participant_id : str
-        Participant identifier
-    condition : str
-        Condition name
-    data_dir : str
-        Directory containing the censoring file
-    n_timepoints : int
-        Expected number of timepoints (for validation)
-    
-    Returns
-    -------
-    np.ndarray
-        Boolean array of shape (n_timepoints,) where True = keep, False = censor
-    
-    Raises
-    ------
-    FileNotFoundError
-        If the censoring file is not found
-    ValueError
-        If the censoring vector length doesn't match n_timepoints
-    """
-    censor_base = f"{participant_id}_{condition}_censor"
-    censor_file = None
-    
-    # Try various file extensions
-    for ext in ['.1D', '.tsv', '.csv', '.txt']:
-        candidate = os.path.join(data_dir, censor_base + ext)
-        if os.path.exists(candidate):
-            censor_file = candidate
-            break
-    
-    if censor_file is None:
-        raise FileNotFoundError(f"Censoring file not found for participant {participant_id}, "
-                               f"condition {condition}: expected {os.path.join(data_dir, censor_base + '.[1D|tsv|csv|txt]')}")
-    
-    # Load the censoring vector
-    censor_vector = np.loadtxt(censor_file)
-    
-    # Ensure it's 1D
-    if censor_vector.ndim != 1:
-        raise ValueError(f"Censoring vector must be 1D, got shape {censor_vector.shape}")
-    
-    # Validate length
-    if len(censor_vector) != n_timepoints:
-        raise ValueError(f"Censoring vector length {len(censor_vector)} does not match "
-                        f"number of timepoints {n_timepoints}")
-    
-    # Convert to boolean: 1 = keep (True), 0 = censor (False)
-    censor_mask = censor_vector.astype(bool)
-    
-    return censor_mask
-
-
-def apply_censoring_to_timeseries(timeseries: np.ndarray, participant_id: str,
-                                   condition: str, data_dir: str) -> np.ndarray:
-    """
-    Apply censoring to time series data.
-    
-    Parameters
-    ----------
-    timeseries : np.ndarray
-        Time series matrix of shape (n_timepoints, n_voxels)
-    participant_id : str
-        Participant identifier
-    condition : str
-        Condition name
-    data_dir : str
-        Directory containing censoring file
-    
-    Returns
-    -------
-    np.ndarray
-        Censored time series of shape (n_timepoints_kept, n_voxels)
-    """
-    n_timepoints = timeseries.shape[0]
-    censor_mask = load_censoring_vector(participant_id, condition, data_dir, n_timepoints)
-    # Keep only non-censored timepoints
-    return timeseries[censor_mask, :]
+from .data_prep import (
+    validate_participant_data,
+    downsample_nifti,
+    downsample_mask,
+    _cached_downsample_path,
+    prepare_masks,
+    find_gm_mask_file,
+    apply_censoring_to_timeseries,
+)
 
 
 def debug_timeseries_nan(timeseries: np.ndarray, condition_name: str = "") -> None:
@@ -902,11 +425,14 @@ def save_fc_matrices_as_nifti(treatment_fc: np.ndarray, control_fc: np.ndarray,
 
 def process_participant(participant_id: str, data_dir: str,
                         treatment_condition: str, control_condition: str,
-                        global_mask: np.ndarray,
+                        global_mask: Optional[np.ndarray] = None,
                         target_resolution: float = 6.0,
                         apply_censoring: bool = False,
                         debug: bool = False,
-                        mask_affine: np.ndarray | None = None) -> tuple:
+                        mask_affine: np.ndarray | None = None,
+                        global_mask_file: Optional[str] = None,
+                        allow_mask_resample: bool = False,
+                        allow_no_mask: bool = False) -> tuple:
     """
     Complete processing pipeline for a single participant.
     
@@ -926,8 +452,9 @@ def process_participant(participant_id: str, data_dir: str,
         Name of treatment condition
     control_condition : str
         Name of control condition
-    global_mask : np.ndarray
-        Global mask (union of all individual masks) at target resolution
+    global_mask : np.ndarray, optional
+        Global mask (union of all individual masks) at target resolution. If None,
+        will be loaded from global_mask_file or created from individual masks.
     target_resolution : float
         Target voxel resolution in mm (default 6.0)
     apply_censoring : bool, optional
@@ -936,6 +463,12 @@ def process_participant(participant_id: str, data_dir: str,
         If True, print debugging information about NaN values in timeseries (default: False)
     mask_affine : np.ndarray, optional
         Affine to use for any debug mask outputs to ensure alignment
+    global_mask_file : str, optional
+        Path to a global mask to use; if provided will be downsampled and validated
+    allow_mask_resample : bool, optional
+        If True, automatically resample masks to match data dimensions and cache them
+    allow_no_mask : bool, optional
+        If True, allows running without masks (full-brain) with a warning
     
     Returns
     -------
@@ -950,16 +483,54 @@ def process_participant(participant_id: str, data_dir: str,
         participant_id, data_dir, treatment_condition, control_condition
     )
     
-    # Find mask files
-    treatment_mask_file = find_gm_mask_file(participant_id, treatment_condition, data_dir)
-    control_mask_file = find_gm_mask_file(participant_id, control_condition, data_dir)
+    # Find mask files (optional)
+    treatment_mask_file = None
+    control_mask_file = None
+    try:
+        treatment_mask_file = find_gm_mask_file(participant_id, treatment_condition, data_dir)
+    except FileNotFoundError:
+        print("  WARNING: Treatment mask file not found; will rely on global mask or fallback")
+    try:
+        control_mask_file = find_gm_mask_file(participant_id, control_condition, data_dir)
+    except FileNotFoundError:
+        print("  WARNING: Control mask file not found; will rely on global mask or fallback")
     
-    # Step 2: Downsample nifti files and masks
+    # Step 2: Downsample nifti files
     print(f"  Downsampling to {target_resolution}x{target_resolution}x{target_resolution} mm³...")
     treatment_downsampled = downsample_nifti(treatment_file, target_resolution)
     control_downsampled = downsample_nifti(control_file, target_resolution)
-    treatment_mask_downsampled = downsample_mask(treatment_mask_file, target_resolution)
-    control_mask_downsampled = downsample_mask(control_mask_file, target_resolution)
+
+    # Validate functional data dimensions
+    treatment_shape = treatment_downsampled.shape[:3]
+    control_shape = control_downsampled.shape[:3]
+    if treatment_shape != control_shape:
+        raise ValueError(f"Treatment and control data shapes differ: {treatment_shape} vs {control_shape}")
+
+    # Load affine from cached downsampled file
+    treatment_cached = _cached_downsample_path(treatment_file, target_resolution)
+    if not os.path.exists(treatment_cached):
+        raise FileNotFoundError(f"Cached downsampled file missing: {treatment_cached}")
+    data_affine = nib.load(treatment_cached).affine
+    if mask_affine is None:
+        mask_affine = data_affine
+
+    # Prepare masks: load, validate, resample, and union if needed
+    global_mask, treatment_mask_downsampled, control_mask_downsampled, mask_affine = prepare_masks(
+        participant_id=participant_id,
+        treatment_condition=treatment_condition,
+        control_condition=control_condition,
+        data_dir=data_dir,
+        target_resolution=target_resolution,
+        data_shape=treatment_shape,
+        data_affine=mask_affine,
+        global_mask=global_mask,
+        global_mask_file=global_mask_file,
+        treatment_mask_file=treatment_mask_file,
+        control_mask_file=control_mask_file,
+        allow_mask_resample=allow_mask_resample,
+        allow_no_mask=allow_no_mask,
+        debug=debug
+    )
     
     # Step 3: Apply global and individual masks, extract time series (with NaN for invalid voxels)
     print(f"  Applying masks and extracting time series...")
