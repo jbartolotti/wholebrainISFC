@@ -101,7 +101,10 @@ def calculate_inter_subject_statistics(correlations: np.ndarray, self_index: int
 def save_brain_map_with_statistics(output_file: str, mean_values: np.ndarray,
                                    t_statistics: np.ndarray, 
                                    reference_nifti: str) -> None:
-    """Write a 2-volume NIfTI (mean, t-stat) aligned to the reference affine."""
+    """Write a 2-volume NIfTI (mean, t-stat) aligned to the reference affine.
+    
+    If output_file ends with .gz, the NIfTI will be automatically gzipped.
+    """
 
     ref_img = nib.load(reference_nifti)
     data = np.stack([mean_values, t_statistics], axis=3)
@@ -169,9 +172,13 @@ def process_group_inter_subject_analysis(fc_change_matrices: Dict[str, np.ndarra
         mean_vol = mean_flat[pid].reshape(global_mask.shape)
         t_vol = t_flat[pid].reshape(global_mask.shape)
 
+        # BIDS-compliant output directory: derivatives/wholebrainISFC/sub-{pid}/
         subj_dir = os.path.join(output_dir, f"sub-{pid}")
         os.makedirs(subj_dir, exist_ok=True)
-        out_file = os.path.join(subj_dir, f"sub-{pid}_desc-ISS_mean_tstat.nii")
+        
+        # BIDS-compliant filename: sub-{pid}_desc-ISS_mean_tstat.nii.gz
+        # (2-volume: volume 0 = mean, volume 1 = t-stat, both in Fisher-Z space)
+        out_file = os.path.join(subj_dir, f"sub-{pid}_desc-ISS_mean_tstat.nii.gz")
         save_brain_map_with_statistics(out_file, mean_vol, t_vol, reference_nifti)
         outputs[pid] = out_file
 

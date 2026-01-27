@@ -381,6 +381,85 @@ def run_participants(
     return results
 
 
+def run_group_inter_subject_analysis(
+    participant_ids: List[str],
+    results_dict: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    bids_dir: str,
+    output_dir: Optional[str] = None,
+    target_resolution: float = config.DEFAULT_TARGET_RESOLUTION,
+) -> Dict[str, str]:
+    """
+    Run group-level inter-subject similarity (ISS) analysis.
+
+    Computes per-voxel correlations of FC-change across participants, derives
+    per-participant mean and t-statistics, and saves to BIDS derivatives.
+
+    Parameters
+    ----------
+    participant_ids : list of str
+        Participant IDs that were processed.
+    results_dict : dict
+        Dictionary mapping participant_id to (treatment_fc, control_fc, fc_change) tuples
+        from run_participants.
+    bids_dir : str
+        BIDS root directory where derivatives are stored.
+    output_dir : str, optional
+        Output directory for ISS maps. Defaults to derivatives/wholebrainISFC.
+    target_resolution : float
+        Target voxel resolution in mm.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping participant_id to output NIfTI file paths.
+    """
+    from wholebrainISFC import inter_subject
+
+    if output_dir is None:
+        output_dir = os.path.join(bids_dir, "derivatives", "wholebrainISFC")
+
+    if len(participant_ids) < 3:
+        print(f"WARNING: Skipping group ISS (need ≥3 participants, have {len(participant_ids)})")
+        return {}
+
+    # Extract FC-change matrices
+    fc_change_matrices = {pid: results_dict[pid][2] for pid in participant_ids}
+
+    # Find a reference NIfTI for affine/shape (use any participant's output)
+    ref_pid = participant_ids[0]
+    ref_nifti = os.path.join(
+        output_dir,
+        f"sub-{ref_pid}",
+        f"res-{int(target_resolution)}",
+        f"sub-{ref_pid}_space-MNI152NLin2009cAsym_res-{int(target_resolution)}_desc-meanFCchange_map.nii",
+    )
+    if not os.path.exists(ref_nifti):
+        print(f"WARNING: Reference NIfTI not found: {ref_nifti}")
+        print("  ISS analysis requires save_niftis=True; skipping.")
+        return {}
+
+    print("\nRunning group-level inter-subject similarity analysis...")
+    print(f"  Participants: {participant_ids}")
+    print(f"  Reference NIfTI: {ref_nifti}")
+
+    iss_output_dir = os.path.join(output_dir, "group", "inter_subject_similarity")
+    iss_results = inter_subject.process_group_inter_subject_analysis(
+        fc_change_matrices=fc_change_matrices,
+        participant_ids=participant_ids,
+        reference_nifti=ref_nifti,
+        output_dir=iss_output_dir,
+    )
+
+    if iss_results:
+        print(f"✓ ISS analysis complete ({len(iss_results)} participants)")
+        for pid, nifti_path in iss_results.items():
+            print(f"  {pid}: {nifti_path}")
+    else:
+        print("⚠ ISS analysis produced no output")
+
+    return iss_results
+
+
 # Placeholders for future higher-level orchestration
 def run_analysis(config_file: str = None) -> None:
     raise NotImplementedError("Full pipeline orchestration not yet implemented.")
@@ -392,12 +471,6 @@ def validate_and_load_config(config_file: str = None) -> Dict:
 
 def process_all_participants(analysis_config: Dict) -> Dict[str, any]:
     raise NotImplementedError("Batch participant processing not yet implemented.")
-
-
-def execute_group_analysis(participant_results: Dict[str, any], 
-                           analysis_config: Dict,
-                           output_dir: str) -> Dict:
-    raise NotImplementedError("Group analysis not yet implemented.")
 
 
 def generate_summary_report(results: Dict, output_file: str) -> None:
