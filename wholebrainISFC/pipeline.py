@@ -161,6 +161,7 @@ def run_participants(
     save_outputs: bool = True,
     save_heatmaps: bool = True,
     save_niftis: bool = True,
+    force_overwrite: bool = False,
 ) -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
     Run participant-level FC processing for multiple participants.
@@ -180,6 +181,7 @@ def run_participants(
         save_outputs: Save .npy matrices.
         save_heatmaps: Save heatmap visualizations.
         save_niftis: Save NIfTI outputs.
+        force_overwrite: If False, skip participant processing when all expected outputs already exist.
     
     Returns:
         Dictionary mapping participant_id to (treatment_fc, control_fc, fc_change) tuples.
@@ -266,6 +268,35 @@ def run_participants(
         if session:
             stem_base += f"_ses-{session}"
         stem_base += f"_space-{space}_res-{int(target_resolution)}"
+
+        # Expected outputs for skip logic
+        required_files = []
+        if save_outputs:
+            required_files.extend([
+                os.path.join(participant_out_dir, f"{stem_base}_task-{treat_task}_desc-FC_matrix.npy"),
+                os.path.join(participant_out_dir, f"{stem_base}_task-{ctrl_task}_desc-FC_matrix.npy"),
+                os.path.join(participant_out_dir, f"{stem_base}_desc-FCchange_matrix.npy"),
+            ])
+            if save_heatmaps:
+                required_files.extend([
+                    os.path.join(figures_dir, f"{stem_base}_task-{treat_task}_desc-FC_matrix.png"),
+                    os.path.join(figures_dir, f"{stem_base}_task-{ctrl_task}_desc-FC_matrix.png"),
+                    os.path.join(figures_dir, f"{stem_base}_desc-FCchange_matrix.png"),
+                ])
+            if save_niftis:
+                required_files.extend([
+                    os.path.join(participant_out_dir, f"{stem_base}_desc-FCstack_bold.nii"),
+                    os.path.join(participant_out_dir, f"{stem_base}_desc-meanFCchange_map.nii"),
+                ])
+
+        if save_outputs and not force_overwrite and required_files and all(os.path.exists(f) for f in required_files):
+            print(f"Outputs exist for participant {participant_id}; skipping (set force_overwrite=True to recompute)")
+            # Load matrices to keep downstream consistency
+            treatment_fc = np.load(os.path.join(participant_out_dir, f"{stem_base}_task-{treat_task}_desc-FC_matrix.npy"))
+            control_fc = np.load(os.path.join(participant_out_dir, f"{stem_base}_task-{ctrl_task}_desc-FC_matrix.npy"))
+            fc_change = np.load(os.path.join(participant_out_dir, f"{stem_base}_desc-FCchange_matrix.npy"))
+            results[participant_id] = (treatment_fc, control_fc, fc_change)
+            continue
 
         treatment_fc, control_fc, fc_change = participant_fc.process_participant(
             participant_id=participant_id,
