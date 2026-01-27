@@ -281,14 +281,14 @@ def run_3dmema_analysis(
     return output_file
 
 
-def run_3dmema_analysis(brain_maps: Dict[str, Tuple[str, str]], 
-                        covariates: Dict[str, Dict[str, float]],
-                        covariate_names: List[str],
-                        output_prefix: str) -> str:
+def run_3dmema_with_covariates(brain_maps: Dict[str, Tuple[str, str]], 
+                               covariates: Dict[str, Dict[str, float]],
+                               covariate_names: List[str],
+                               output_prefix: str) -> str:
     """
-    Run AFNI's 3dMEMA for mixed-effects meta-analysis.
+    Run AFNI's 3dMEMA for mixed-effects meta-analysis with covariates.
     
-    Performs 1-sample mixed-effects analysis using mean and t-statistic
+    Performs mixed-effects analysis using mean and t-statistic
     brain maps from each participant, with specified covariates.
     
     Parameters
@@ -306,8 +306,12 @@ def run_3dmema_analysis(brain_maps: Dict[str, Tuple[str, str]],
     -------
     str
         Path to AFNI output statistics file
+    
+    Notes
+    -----
+    Placeholder for future covariate-based analyses.
     """
-    pass
+    raise NotImplementedError("Covariate-based 3dMEMA not yet implemented.")
 
 
 def cluster_analysis(stats_file: str, significance_levels: List[float] = [0.05, 0.01, 0.001]) -> Dict:
