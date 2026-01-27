@@ -103,10 +103,16 @@ def resolve_bids_inputs(
     treatment_file = _with_ext(os.path.join(func_dir, treat_stem), [".nii.gz", ".nii"])
     control_file = _with_ext(os.path.join(func_dir, ctrl_stem), [".nii.gz", ".nii"])
 
-    # Masks
+    # Masks (optional)
     mask_suffix = f"_space-{space}_res-{res_label}_desc-GM_mask"
-    treatment_mask_file = _with_ext(os.path.join(func_dir, f"{stem_base}_task-{treatment_label}{mask_suffix}"), [".nii.gz", ".nii"])
-    control_mask_file = _with_ext(os.path.join(func_dir, f"{stem_base}_task-{control_label}{mask_suffix}"), [".nii.gz", ".nii"])
+    treatment_mask_file = _pick_first_existing([
+        os.path.join(func_dir, f"{stem_base}_task-{treatment_label}{mask_suffix}.nii.gz"),
+        os.path.join(func_dir, f"{stem_base}_task-{treatment_label}{mask_suffix}.nii"),
+    ])
+    control_mask_file = _pick_first_existing([
+        os.path.join(func_dir, f"{stem_base}_task-{control_label}{mask_suffix}.nii.gz"),
+        os.path.join(func_dir, f"{stem_base}_task-{control_label}{mask_suffix}.nii"),
+    ])
 
     # Censor (TSV/CSV/1D)
     censor_stem_t = os.path.join(func_dir, f"{stem_base}_task-{treatment_label}_desc-censor_timeseries")
