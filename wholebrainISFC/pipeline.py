@@ -103,16 +103,27 @@ def resolve_bids_inputs(
     treatment_file = _with_ext(os.path.join(func_dir, treat_stem), [".nii.gz", ".nii"])
     control_file = _with_ext(os.path.join(func_dir, ctrl_stem), [".nii.gz", ".nii"])
 
-    # Masks (optional)
-    mask_suffix = f"_space-{space}_res-{res_label}_desc-GM_mask"
+    # Masks (optional; prefer target resolution, then fall back to any resolution and auto-downsample)
+    mask_suffix = f"_space-{space}_desc-GM_mask"
     treatment_mask_file = _pick_first_existing([
-        os.path.join(func_dir, f"{stem_base}_task-{treatment_label}{mask_suffix}.nii.gz"),
-        os.path.join(func_dir, f"{stem_base}_task-{treatment_label}{mask_suffix}.nii"),
+        os.path.join(func_dir, f"{stem_base}_task-{treatment_label}_space-{space}_res-{res_label}_desc-GM_mask.nii.gz"),
+        os.path.join(func_dir, f"{stem_base}_task-{treatment_label}_space-{space}_res-{res_label}_desc-GM_mask.nii"),
     ])
+    if not treatment_mask_file:
+        treatment_mask_file = _pick_first_existing([
+            os.path.join(func_dir, f"{stem_base}_task-{treatment_label}{mask_suffix}.nii.gz"),
+            os.path.join(func_dir, f"{stem_base}_task-{treatment_label}{mask_suffix}.nii"),
+        ])
+    
     control_mask_file = _pick_first_existing([
-        os.path.join(func_dir, f"{stem_base}_task-{control_label}{mask_suffix}.nii.gz"),
-        os.path.join(func_dir, f"{stem_base}_task-{control_label}{mask_suffix}.nii"),
+        os.path.join(func_dir, f"{stem_base}_task-{control_label}_space-{space}_res-{res_label}_desc-GM_mask.nii.gz"),
+        os.path.join(func_dir, f"{stem_base}_task-{control_label}_space-{space}_res-{res_label}_desc-GM_mask.nii"),
     ])
+    if not control_mask_file:
+        control_mask_file = _pick_first_existing([
+            os.path.join(func_dir, f"{stem_base}_task-{control_label}{mask_suffix}.nii.gz"),
+            os.path.join(func_dir, f"{stem_base}_task-{control_label}{mask_suffix}.nii"),
+        ])
 
     # Censor (TSV/CSV/1D)
     censor_stem_t = os.path.join(func_dir, f"{stem_base}_task-{treatment_label}_desc-censor_timeseries")
@@ -184,6 +195,25 @@ def run_participants(
     # Prepare global mask and affine once for all participants
     mask_affine = None
     global_mask = None
+
+    # If not provided and using BIDS, try default derivatives location
+    # (prefer target resolution; fall back to any resolution and downsample as needed)
+    if global_mask_file is None and use_bids:
+        default_mask = _pick_first_existing([
+            os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                         f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask.nii.gz"),
+            os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                         f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask.nii"),
+        ])
+        if not default_mask:
+            default_mask = _pick_first_existing([
+                os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                             f"global_space-{space}_desc-union_mask.nii.gz"),
+                os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                             f"global_space-{space}_desc-union_mask.nii"),
+            ])
+        if default_mask:
+            global_mask_file = default_mask
 
     if global_mask_file:
         print(f"Loading global mask from file: {global_mask_file}")
