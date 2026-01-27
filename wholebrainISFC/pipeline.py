@@ -431,9 +431,9 @@ def run_group_inter_subject_analysis(
     # Find the global mask as reference (should be in derivatives/masks/)
     ref_nifti = _pick_first_existing([
         os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
-                     f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask.nii.gz"),
+                     f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask_{int(target_resolution)}mm.nii.gz"),
         os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
-                     f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask.nii"),
+                     f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask_{int(target_resolution)}mm.nii"),
         os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
                      f"global_space-{space}_desc-union_mask.nii.gz"),
         os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
