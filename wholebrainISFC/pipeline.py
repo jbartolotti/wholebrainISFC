@@ -387,6 +387,7 @@ def run_group_inter_subject_analysis(
     bids_dir: str,
     output_dir: Optional[str] = None,
     target_resolution: float = config.DEFAULT_TARGET_RESOLUTION,
+    space: str = "MNI152NLin2009cAsym",
 ) -> Dict[str, str]:
     """
     Run group-level inter-subject similarity (ISS) analysis.
@@ -407,6 +408,8 @@ def run_group_inter_subject_analysis(
         Output directory for ISS maps. Defaults to derivatives/wholebrainISFC.
     target_resolution : float
         Target voxel resolution in mm.
+    space : str
+        Brain space name (default "MNI152NLin2009cAsym").
 
     Returns
     -------
@@ -425,22 +428,26 @@ def run_group_inter_subject_analysis(
     # Extract FC-change matrices
     fc_change_matrices = {pid: results_dict[pid][2] for pid in participant_ids}
 
-    # Find a reference NIfTI for affine/shape (use any participant's output)
-    ref_pid = participant_ids[0]
-    ref_nifti = os.path.join(
-        output_dir,
-        f"sub-{ref_pid}",
-        f"res-{int(target_resolution)}",
-        f"sub-{ref_pid}_space-MNI152NLin2009cAsym_res-{int(target_resolution)}_desc-meanFCchange_map.nii",
-    )
-    if not os.path.exists(ref_nifti):
-        print(f"WARNING: Reference NIfTI not found: {ref_nifti}")
-        print("  ISS analysis requires save_niftis=True; skipping.")
+    # Find the global mask as reference (should be in derivatives/masks/)
+    ref_nifti = _pick_first_existing([
+        os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                     f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask.nii.gz"),
+        os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                     f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask.nii"),
+        os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                     f"global_space-{space}_desc-union_mask.nii.gz"),
+        os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                     f"global_space-{space}_desc-union_mask.nii"),
+    ])
+    
+    if not ref_nifti:
+        print("WARNING: Global mask not found in derivatives/masks/")
+        print("  ISS analysis requires a global mask; skipping.")
         return {}
 
     print("\nRunning group-level inter-subject similarity analysis...")
     print(f"  Participants: {participant_ids}")
-    print(f"  Reference NIfTI: {ref_nifti}")
+    print(f"  Reference mask: {ref_nifti}")
 
     iss_output_dir = os.path.join(output_dir, "group", "inter_subject_similarity")
     iss_results = inter_subject.process_group_inter_subject_analysis(
