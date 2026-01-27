@@ -4,6 +4,11 @@ Configuration module for reading and managing user inputs and analysis parameter
 
 from typing import Dict, List, Tuple
 
+# Default analysis settings
+DEFAULT_TARGET_RESOLUTION = 6.0  # mm
+DEFAULT_ALLOW_MASK_RESAMPLE = False
+DEFAULT_ALLOW_NO_MASK = False
+
 
 def read_user_inputs() -> Dict:
     """
