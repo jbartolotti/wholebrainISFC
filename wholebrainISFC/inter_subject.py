@@ -185,6 +185,102 @@ def process_group_inter_subject_analysis(fc_change_matrices: Dict[str, np.ndarra
     return outputs
 
 
+def run_3dmema_analysis(
+    iss_results: Dict[str, str],
+    output_dir: str,
+    set_label: str = "ISS",
+) -> str:
+    """
+    Run AFNI's 3dMEMA for mixed-effects meta-analysis on ISS results.
+    
+    Performs one-sample group analysis using mean and t-statistic volumes
+    from each participant's ISS brain maps.
+    
+    Parameters
+    ----------
+    iss_results : dict
+        Dictionary mapping participant_id to ISS NIfTI file path.
+        Each file should contain 2 volumes: [0] = mean, [1] = t-stat.
+    output_dir : str
+        Output directory for 3dMEMA results.
+    set_label : str
+        Label for the analysis set (default "ISS").
+    
+    Returns
+    -------
+    str
+        Path to 3dMEMA output statistics file (+tlrc.HEAD).
+        
+    Raises
+    ------
+    RuntimeError
+        If 3dMEMA command fails or is not found.
+    FileNotFoundError
+        If any ISS input files are missing.
+    """
+    import subprocess
+    
+    if len(iss_results) < 3:
+        raise ValueError(f"3dMEMA requires at least 3 subjects; got {len(iss_results)}")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Validate all input files exist
+    for pid, nifti_path in iss_results.items():
+        if not os.path.exists(nifti_path):
+            raise FileNotFoundError(f"ISS file not found for {pid}: {nifti_path}")
+    
+    # Build 3dMEMA command
+    output_prefix = os.path.join(output_dir, f"3dMEMA_{set_label}")
+    
+    cmd = [
+        "3dMEMA",
+        "-prefix", output_prefix,
+        "-set", set_label,
+    ]
+    
+    # Add participant data: sub-ID mean_volume'[0]' tstat_volume'[1]'
+    for pid, nifti_path in sorted(iss_results.items()):
+        cmd.extend([
+            f"sub-{pid}",
+            f"{nifti_path}[0]",  # Mean volume
+            f"{nifti_path}[1]",  # T-stat volume
+        ])
+    
+    print("\nRunning 3dMEMA group analysis...")
+    print(f"  Participants: {sorted(iss_results.keys())}")
+    print(f"  Output prefix: {output_prefix}")
+    print(f"  Command: {' '.join(cmd)}")
+    
+    # Run 3dMEMA
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        print("  3dMEMA stdout:")
+        for line in result.stdout.strip().split('\n'):
+            print(f"    {line}")
+    except subprocess.CalledProcessError as e:
+        print(f"  ERROR: 3dMEMA failed with return code {e.returncode}")
+        print(f"  stderr: {e.stderr}")
+        raise RuntimeError(f"3dMEMA failed: {e.stderr}")
+    except FileNotFoundError:
+        raise RuntimeError("3dMEMA command not found. Ensure AFNI is installed and in PATH.")
+    
+    # Return the output file path (AFNI creates +tlrc.HEAD/BRIK)
+    output_file = output_prefix + "+tlrc.HEAD"
+    if not os.path.exists(output_file):
+        # Try .nii if 3dMEMA was configured to output NIfTI
+        output_file = output_prefix + ".nii"
+        if not os.path.exists(output_file):
+            output_file = output_prefix + ".nii.gz"
+    
+    return output_file
+
+
 def run_3dmema_analysis(brain_maps: Dict[str, Tuple[str, str]], 
                         covariates: Dict[str, Dict[str, float]],
                         covariate_names: List[str],

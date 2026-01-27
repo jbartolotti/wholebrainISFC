@@ -467,6 +467,53 @@ def run_group_inter_subject_analysis(
     return iss_results
 
 
+def run_group_3dmema_analysis(
+    iss_results: Dict[str, str],
+    bids_dir: str,
+    output_dir: Optional[str] = None,
+    set_label: str = "ISS",
+) -> str:
+    """
+    Run AFNI 3dMEMA mixed-effects meta-analysis on ISS results.
+
+    Parameters
+    ----------
+    iss_results : dict
+        Dictionary mapping participant_id to ISS NIfTI file path (from run_group_inter_subject_analysis).
+    bids_dir : str
+        BIDS root directory where derivatives are stored.
+    output_dir : str, optional
+        Output directory for 3dMEMA results. Defaults to derivatives/wholebrainISFC/group/3dMEMA.
+    set_label : str
+        Label for the analysis set (default "ISS").
+
+    Returns
+    -------
+    str
+        Path to 3dMEMA output file.
+    """
+    from wholebrainISFC import inter_subject
+
+    if output_dir is None:
+        output_dir = os.path.join(bids_dir, "derivatives", "wholebrainISFC", "group", "3dMEMA")
+
+    if len(iss_results) < 3:
+        print(f"WARNING: Skipping 3dMEMA (need ≥3 participants, have {len(iss_results)})")
+        return ""
+
+    try:
+        mema_output = inter_subject.run_3dmema_analysis(
+            iss_results=iss_results,
+            output_dir=output_dir,
+            set_label=set_label,
+        )
+        print(f"✓ 3dMEMA analysis complete: {mema_output}")
+        return mema_output
+    except Exception as e:
+        print(f"⚠ 3dMEMA analysis failed: {e}")
+        return ""
+
+
 # Placeholders for future higher-level orchestration
 def run_analysis(config_file: str = None) -> None:
     raise NotImplementedError("Full pipeline orchestration not yet implemented.")
