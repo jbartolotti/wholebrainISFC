@@ -25,6 +25,52 @@ from .data_prep import (
 )
 
 
+def apply_global_and_individual_mask(data_4d: np.ndarray,
+                                     global_mask: np.ndarray,
+                                     individual_mask: np.ndarray,
+                                     debug: bool = False) -> np.ndarray:
+    """Extract time series using a global mask with individual-mask holes marked NaN.
+
+    Returns an array shaped (n_timepoints, n_global_voxels). Voxels that are
+    in the global mask but excluded by the individual mask are filled with NaN
+    so downstream FC calculations retain alignment with the global mask layout.
+    """
+
+    if data_4d.ndim != 4:
+        raise ValueError(f"Expected 4D data (x, y, z, t); got shape {data_4d.shape}")
+
+    if data_4d.shape[:3] != global_mask.shape or data_4d.shape[:3] != individual_mask.shape:
+        raise ValueError(
+            "Data and mask shapes must match: "
+            f"data {data_4d.shape[:3]}, global {global_mask.shape}, individual {individual_mask.shape}"
+        )
+
+    n_timepoints = data_4d.shape[3]
+    global_flat = global_mask.flatten() > 0
+    individual_flat = individual_mask.flatten() > 0
+    global_indices = np.where(global_flat)[0]
+
+    if global_indices.size == 0:
+        raise ValueError("Global mask contains zero voxels after thresholding")
+
+    data_flat = data_4d.reshape(-1, n_timepoints)
+    data_in_global = data_flat[global_indices]  # shape: (n_voxels, n_timepoints)
+
+    timeseries = data_in_global.T  # (n_timepoints, n_voxels)
+
+    # Fill voxels excluded by individual mask with NaN but keep column alignment
+    excluded = ~individual_flat[global_indices]
+    if np.any(excluded):
+        timeseries[:, excluded] = np.nan
+
+    if debug:
+        n_global = global_indices.size
+        n_included = n_global - int(np.sum(excluded))
+        print(f"    Masking: global voxels {n_global}, individual-included {n_included}, excluded {int(np.sum(excluded))}")
+
+    return timeseries
+
+
 def debug_timeseries_nan(timeseries: np.ndarray, condition_name: str = "") -> None:
     """
     Debug function to analyze NaN values in timeseries data.
