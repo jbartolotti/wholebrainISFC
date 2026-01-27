@@ -56,11 +56,84 @@ def _create_heatmap(data: np.ndarray, title: str, filename: str, cmap: str = 'Rd
     plt.close()
 
 
+def _pick_first_existing(candidates: List[str]) -> Optional[str]:
+    """Return first existing path from candidates."""
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def resolve_bids_inputs(
+    bids_dir: str,
+    participant_id: str,
+    treatment_label: str,
+    control_label: str,
+    session: Optional[str] = None,
+    space: str = "MNI152NLin2009cAsym",
+    res_label: Optional[str] = None,
+) -> Dict[str, str]:
+    """Resolve BIDS-formatted inputs for a participant.
+
+    Looks for preproc BOLD, GM masks, and censor files using standard BIDS entities.
+    """
+
+    if res_label is None:
+        res_label = "6"
+
+    sub_prefix = f"sub-{participant_id}"
+    ses_component = f"ses-{session}" if session else None
+    stem_base = sub_prefix
+    if ses_component:
+        stem_base += f"_{ses_component}"
+
+    def _with_ext(base: str, exts: List[str]) -> str:
+        candidates = [base + ext for ext in exts]
+        found = _pick_first_existing(candidates)
+        if found is None:
+            raise FileNotFoundError(
+                f"Missing file; tried: {', '.join(candidates)}"
+            )
+        return found
+
+    func_dir = os.path.join(bids_dir, sub_prefix, ses_component, "func") if ses_component else os.path.join(bids_dir, sub_prefix, "func")
+
+    treat_stem = f"{stem_base}_task-{treatment_label}_space-{space}_desc-preproc_bold"
+    ctrl_stem = f"{stem_base}_task-{control_label}_space-{space}_desc-preproc_bold"
+    treatment_file = _with_ext(os.path.join(func_dir, treat_stem), [".nii.gz", ".nii"])
+    control_file = _with_ext(os.path.join(func_dir, ctrl_stem), [".nii.gz", ".nii"])
+
+    # Masks
+    mask_suffix = f"_space-{space}_res-{res_label}_desc-GM_mask"
+    treatment_mask_file = _with_ext(os.path.join(func_dir, f"{stem_base}_task-{treatment_label}{mask_suffix}"), [".nii.gz", ".nii"])
+    control_mask_file = _with_ext(os.path.join(func_dir, f"{stem_base}_task-{control_label}{mask_suffix}"), [".nii.gz", ".nii"])
+
+    # Censor (TSV/CSV/1D)
+    censor_stem_t = os.path.join(func_dir, f"{stem_base}_task-{treatment_label}_desc-censor_timeseries")
+    censor_stem_c = os.path.join(func_dir, f"{stem_base}_task-{control_label}_desc-censor_timeseries")
+    treatment_censor_file = _with_ext(censor_stem_t, [".tsv", ".csv", ".txt", ".1D"])
+    control_censor_file = _with_ext(censor_stem_c, [".tsv", ".csv", ".txt", ".1D"])
+
+    return {
+        "treatment_file": treatment_file,
+        "control_file": control_file,
+        "treatment_mask_file": treatment_mask_file,
+        "control_mask_file": control_mask_file,
+        "treatment_censor_file": treatment_censor_file,
+        "control_censor_file": control_censor_file,
+        "func_dir": func_dir,
+    }
+
+
 def run_participants(
     participant_ids: List[str],
-    treatment_condition: str,
-    control_condition: str,
+    treatment_label: str,
+    control_label: str,
     data_dir: str,
+    bids_dir: str,
+    use_bids: bool = False,
+    session: Optional[str] = None,
+    space: str = "MNI152NLin2009cAsym",
     global_mask_file: Optional[str] = None,
     target_resolution: float = config.DEFAULT_TARGET_RESOLUTION,
     apply_censoring: bool = True,
@@ -77,9 +150,9 @@ def run_participants(
     
     Args:
         participant_ids: List of participant IDs to process.
-        treatment_condition: Treatment condition label.
-        control_condition: Control condition label.
-        data_dir: Directory containing participant data.
+        treatment_label: Condition/task label for treatment arm.
+        control_label: Condition/task label for control arm.
+        data_dir: Directory containing participant data (ad-hoc mode).
         global_mask_file: Path to global mask file, or None to create from individual masks.
         target_resolution: Target voxel resolution in mm.
         apply_censoring: Whether to apply censoring.
@@ -94,8 +167,12 @@ def run_participants(
     Returns:
         Dictionary mapping participant_id to (treatment_fc, control_fc, fc_change) tuples.
     """
+    if bids_dir is None:
+        raise ValueError("bids_dir is required to place derivatives")
+
+    deriv_root = os.path.join(bids_dir, "derivatives", "wholebrainISFC")
     if output_dir is None:
-        output_dir = data_dir
+        output_dir = deriv_root
     os.makedirs(output_dir, exist_ok=True)
 
     # Prepare global mask and affine once for all participants
@@ -121,13 +198,44 @@ def run_participants(
     for participant_id in participant_ids:
         print(f"Processing participant: {participant_id}")
         print("-" * 80)
-        
-        # Run participant processing
+
+        treat_task = treatment_label
+        ctrl_task = control_label
+
+        resolved = {}
+        participant_data_dir = data_dir
+        if use_bids:
+            resolved = resolve_bids_inputs(
+                bids_dir=bids_dir,
+                participant_id=participant_id,
+                treatment_label=treat_task,
+                control_label=ctrl_task,
+                session=session,
+                space=space,
+                res_label=str(int(target_resolution)),
+            )
+            participant_data_dir = resolved["func_dir"]
+
+        # Build derivative paths (always under derivatives/wholebrainISFC)
+        sub_dir_parts = [f"sub-{participant_id}"]
+        if session:
+            sub_dir_parts.append(f"ses-{session}")
+        sub_dir_parts.append(f"res-{int(target_resolution)}")
+        participant_out_dir = os.path.join(output_dir, *sub_dir_parts)
+        figures_dir = os.path.join(participant_out_dir, "figures")
+        os.makedirs(participant_out_dir, exist_ok=True)
+        os.makedirs(figures_dir, exist_ok=True)
+
+        stem_base = f"sub-{participant_id}"
+        if session:
+            stem_base += f"_ses-{session}"
+        stem_base += f"_space-{space}_res-{int(target_resolution)}"
+
         treatment_fc, control_fc, fc_change = participant_fc.process_participant(
             participant_id=participant_id,
-            data_dir=data_dir,
-            treatment_condition=treatment_condition,
-            control_condition=control_condition,
+            data_dir=participant_data_dir,
+            treatment_condition=treatment_label,
+            control_condition=control_label,
             global_mask=global_mask,
             target_resolution=target_resolution,
             apply_censoring=apply_censoring,
@@ -136,37 +244,43 @@ def run_participants(
             global_mask_file=global_mask_file,
             allow_mask_resample=allow_mask_resample,
             allow_no_mask=allow_no_mask,
+            treatment_file=resolved.get("treatment_file"),
+            control_file=resolved.get("control_file"),
+            treatment_mask_file=resolved.get("treatment_mask_file"),
+            control_mask_file=resolved.get("control_mask_file"),
+            treatment_censor_file=resolved.get("treatment_censor_file"),
+            control_censor_file=resolved.get("control_censor_file"),
         )
-        
+
         results[participant_id] = (treatment_fc, control_fc, fc_change)
-        
+
         if not save_outputs:
             continue
 
-        # Save matrices as .npy
-        np.save(os.path.join(output_dir, f"results_{participant_id}_treatment_fc.npy"), treatment_fc)
-        np.save(os.path.join(output_dir, f"results_{participant_id}_control_fc.npy"), control_fc)
-        np.save(os.path.join(output_dir, f"results_{participant_id}_fc_change.npy"), fc_change)
+        # Save matrices as .npy in derivatives
+        np.save(os.path.join(participant_out_dir, f"{stem_base}_task-{treat_task}_desc-FC_matrix.npy"), treatment_fc)
+        np.save(os.path.join(participant_out_dir, f"{stem_base}_task-{ctrl_task}_desc-FC_matrix.npy"), control_fc)
+        np.save(os.path.join(participant_out_dir, f"{stem_base}_desc-FCchange_matrix.npy"), fc_change)
 
         if save_heatmaps:
             _create_heatmap(
                 treatment_fc,
                 f"Treatment FC Matrix\nParticipant {participant_id}",
-                os.path.join(output_dir, f"results_{participant_id}_treatment_fc.png"),
+                os.path.join(figures_dir, f"{stem_base}_task-{treat_task}_desc-FC_matrix.png"),
                 cmap='viridis',
                 center_zero=False,
             )
             _create_heatmap(
                 control_fc,
                 f"Control FC Matrix\nParticipant {participant_id}",
-                os.path.join(output_dir, f"results_{participant_id}_control_fc.png"),
+                os.path.join(figures_dir, f"{stem_base}_task-{ctrl_task}_desc-FC_matrix.png"),
                 cmap='viridis',
                 center_zero=False,
             )
             _create_heatmap(
                 fc_change,
                 f"FC Change (Treatment - Control)\nParticipant {participant_id}",
-                os.path.join(output_dir, f"results_{participant_id}_fc_change.png"),
+                os.path.join(figures_dir, f"{stem_base}_desc-FCchange_matrix.png"),
                 cmap='RdBu_r',
                 center_zero=True,
             )
@@ -175,7 +289,7 @@ def run_participants(
             if global_mask is None:
                 print("  WARNING: No global mask available; skipping NIfTI outputs")
             else:
-                fc_matrices_file = os.path.join(output_dir, f"results_{participant_id}_fc_matrices_4d.nii")
+                fc_matrices_file = os.path.join(participant_out_dir, f"{stem_base}_desc-FCstack_bold.nii")
                 participant_fc.save_fc_matrices_as_nifti(
                     treatment_fc=treatment_fc,
                     control_fc=control_fc,
@@ -186,7 +300,7 @@ def run_participants(
                     mask_affine=mask_affine,
                 )
 
-                mean_fc_map_file = os.path.join(output_dir, f"results_{participant_id}_mean_fc_change.nii")
+                mean_fc_map_file = os.path.join(participant_out_dir, f"{stem_base}_desc-meanFCchange_map.nii")
                 participant_fc.create_mean_fc_change_map(
                     fc_change=fc_change,
                     global_mask=global_mask,
@@ -194,7 +308,7 @@ def run_participants(
                     target_resolution=target_resolution,
                     mask_affine=mask_affine,
                 )
-        
+
         print(f"✓ Participant {participant_id} complete\n")
 
     return results

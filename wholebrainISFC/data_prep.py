@@ -279,20 +279,24 @@ def find_gm_mask_file(participant_id: str, condition: str, data_dir: str) -> str
     )
 
 
-def load_censoring_vector(participant_id: str, condition: str, data_dir: str, n_timepoints: int) -> np.ndarray:
+def load_censoring_vector(participant_id: str, condition: str, data_dir: str, n_timepoints: int,
+                          censor_file: Optional[str] = None) -> np.ndarray:
     """Load censoring vector for a participant and condition."""
-    censor_base = f"{participant_id}_{condition}_censor"
-    censor_file = None
-    for ext in ['.1D', '.tsv', '.csv', '.txt']:
-        candidate = os.path.join(data_dir, censor_base + ext)
-        if os.path.exists(candidate):
-            censor_file = candidate
-            break
-    if censor_file is None:
-        raise FileNotFoundError(
-            f"Censoring file not found for participant {participant_id}, condition {condition}: "
-            f"expected {os.path.join(data_dir, censor_base + '.[1D|tsv|csv|txt]')}"
-        )
+    if censor_file:
+        if not os.path.exists(censor_file):
+            raise FileNotFoundError(f"Censoring file not found at provided path: {censor_file}")
+    else:
+        censor_base = f"{participant_id}_{condition}_censor"
+        for ext in ['.1D', '.tsv', '.csv', '.txt']:
+            candidate = os.path.join(data_dir, censor_base + ext)
+            if os.path.exists(candidate):
+                censor_file = candidate
+                break
+        if censor_file is None:
+            raise FileNotFoundError(
+                f"Censoring file not found for participant {participant_id}, condition {condition}: "
+                f"expected {os.path.join(data_dir, censor_base + '.[1D|tsv|csv|txt]')}"
+            )
 
     censor_vector = np.loadtxt(censor_file)
     if censor_vector.ndim != 1:
@@ -305,8 +309,9 @@ def load_censoring_vector(participant_id: str, condition: str, data_dir: str, n_
 
 
 def apply_censoring_to_timeseries(timeseries: np.ndarray, participant_id: str,
-                                   condition: str, data_dir: str) -> np.ndarray:
+                                   condition: str, data_dir: str,
+                                   censor_file: Optional[str] = None) -> np.ndarray:
     """Apply censoring to time series data using participant/condition censor file."""
     n_timepoints = timeseries.shape[0]
-    censor_mask = load_censoring_vector(participant_id, condition, data_dir, n_timepoints)
+    censor_mask = load_censoring_vector(participant_id, condition, data_dir, n_timepoints, censor_file)
     return timeseries[censor_mask, :]

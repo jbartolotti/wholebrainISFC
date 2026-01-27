@@ -478,7 +478,13 @@ def process_participant(participant_id: str, data_dir: str,
                         mask_affine: np.ndarray | None = None,
                         global_mask_file: Optional[str] = None,
                         allow_mask_resample: bool = False,
-                        allow_no_mask: bool = False) -> tuple:
+                        allow_no_mask: bool = False,
+                        treatment_file: Optional[str] = None,
+                        control_file: Optional[str] = None,
+                        treatment_mask_file: Optional[str] = None,
+                        control_mask_file: Optional[str] = None,
+                        treatment_censor_file: Optional[str] = None,
+                        control_censor_file: Optional[str] = None) -> tuple:
     """
     Complete processing pipeline for a single participant.
     
@@ -525,21 +531,22 @@ def process_participant(participant_id: str, data_dir: str,
     # Step 1: Validate input data
     print(f"Processing participant {participant_id}...")
     print(f"  Validating input data...")
-    treatment_file, control_file = validate_participant_data(
-        participant_id, data_dir, treatment_condition, control_condition
-    )
+    if treatment_file is None or control_file is None:
+        treatment_file, control_file = validate_participant_data(
+            participant_id, data_dir, treatment_condition, control_condition
+        )
     
     # Find mask files (optional)
-    treatment_mask_file = None
-    control_mask_file = None
-    try:
-        treatment_mask_file = find_gm_mask_file(participant_id, treatment_condition, data_dir)
-    except FileNotFoundError:
-        print("  WARNING: Treatment mask file not found; will rely on global mask or fallback")
-    try:
-        control_mask_file = find_gm_mask_file(participant_id, control_condition, data_dir)
-    except FileNotFoundError:
-        print("  WARNING: Control mask file not found; will rely on global mask or fallback")
+    if treatment_mask_file is None:
+        try:
+            treatment_mask_file = find_gm_mask_file(participant_id, treatment_condition, data_dir)
+        except FileNotFoundError:
+            print("  WARNING: Treatment mask file not found; will rely on global mask or fallback")
+    if control_mask_file is None:
+        try:
+            control_mask_file = find_gm_mask_file(participant_id, control_condition, data_dir)
+        except FileNotFoundError:
+            print("  WARNING: Control mask file not found; will rely on global mask or fallback")
     
     # Step 2: Downsample nifti files
     print(f"  Downsampling to {target_resolution}x{target_resolution}x{target_resolution} mm³...")
@@ -591,10 +598,12 @@ def process_participant(participant_id: str, data_dir: str,
     if apply_censoring:
         print(f"  Applying censoring...")
         treatment_timeseries = apply_censoring_to_timeseries(
-            treatment_timeseries, participant_id, treatment_condition, data_dir
+            treatment_timeseries, participant_id, treatment_condition, data_dir,
+            censor_file=treatment_censor_file
         )
         control_timeseries = apply_censoring_to_timeseries(
-            control_timeseries, participant_id, control_condition, data_dir
+            control_timeseries, participant_id, control_condition, data_dir,
+            censor_file=control_censor_file
         )
 
     # Debug: save zero-variance voxel masks
