@@ -281,7 +281,10 @@ def find_gm_mask_file(participant_id: str, condition: str, data_dir: str) -> str
 
 def load_censoring_vector(participant_id: str, condition: str, data_dir: str, n_timepoints: int,
                           censor_file: Optional[str] = None) -> np.ndarray:
-    """Load censoring vector for a participant and condition."""
+    """Load censoring vector for a participant and condition.
+    
+    Handles BIDS-formatted TSV/CSV files with headers (skips first row for TSV/CSV).
+    """
     if censor_file:
         if not os.path.exists(censor_file):
             raise FileNotFoundError(f"Censoring file not found at provided path: {censor_file}")
@@ -298,7 +301,12 @@ def load_censoring_vector(participant_id: str, condition: str, data_dir: str, n_
                 f"expected {os.path.join(data_dir, censor_base + '.[1D|tsv|csv|txt]')}"
             )
 
-    censor_vector = np.loadtxt(censor_file)
+    # BIDS TSV/CSV files have headers; skip them. 1D files do not.
+    skiprows = 0
+    if censor_file.endswith(('.tsv', '.csv', '.txt')):
+        skiprows = 1
+    
+    censor_vector = np.loadtxt(censor_file, skiprows=skiprows)
     if censor_vector.ndim != 1:
         raise ValueError(f"Censoring vector must be 1D, got shape {censor_vector.shape}")
     if len(censor_vector) != n_timepoints:
