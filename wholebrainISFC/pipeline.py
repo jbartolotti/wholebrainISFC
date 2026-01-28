@@ -673,6 +673,8 @@ def run_group_inter_subject_analysis(
     output_dir: Optional[str] = None,
     target_resolution: float = config.DEFAULT_TARGET_RESOLUTION,
     space: str = "MNI152NLin2009cAsym",
+    voxel_chunk_size: int = 500,
+    use_float32: bool = True,
 ) -> Dict[str, str]:
     """
     Run group-level inter-subject similarity (ISS) analysis.
@@ -695,6 +697,12 @@ def run_group_inter_subject_analysis(
         Target voxel resolution in mm.
     space : str
         Brain space name (default "MNI152NLin2009cAsym").
+    voxel_chunk_size : int
+        Number of voxels to process at once. Smaller = less memory, slower.
+        Default 500 (~19 MB per chunk for 37 participants).
+        Reduce to 200-300 if out of memory; increase to 1000+ if memory-rich.
+    use_float32 : bool
+        Store outputs as float32 (saves 50% disk space) instead of float64.
 
     Returns
     -------
@@ -740,6 +748,8 @@ def run_group_inter_subject_analysis(
         participant_ids=participant_ids,
         reference_nifti=ref_nifti,
         output_dir=iss_output_dir,
+        voxel_chunk_size=voxel_chunk_size,
+        use_float32=use_float32,
     )
 
     if iss_results:

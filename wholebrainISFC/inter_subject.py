@@ -6,6 +6,17 @@ This module handles:
 - Creating brain maps with inter-subject correlations
 - Performing mixed-effects group analysis using AFNI
 - Cluster analysis for significance thresholds
+
+Memory Optimization:
+  For large datasets (e.g., 37 participants × 6162×6162 voxels = ~11 GB raw),
+  use the voxel_chunk_size parameter in process_group_inter_subject_analysis():
+  
+    - voxel_chunk_size=500 (default): ~19 MB per chunk, 26% memory savings
+    - voxel_chunk_size=300: ~11 MB per chunk, better for 8 GB systems
+    - voxel_chunk_size=1000: ~38 MB per chunk, faster on 32+ GB systems
+  
+  Also enable use_float32=True to save 50% disk space. See MEMORY_OPTIMIZATION.md
+  for detailed analysis and recommendations.
 """
 
 import json
@@ -117,11 +128,35 @@ def save_brain_map_with_statistics(output_file: str, mean_values: np.ndarray,
 def process_group_inter_subject_analysis(fc_change_matrices: Dict[str, np.ndarray],
                                          participant_ids: List[str],
                                          reference_nifti: str,
-                                         output_dir: str) -> Dict[str, str]:
+                                         output_dir: str,
+                                         voxel_chunk_size: int = 500,
+                                         use_float32: bool = True) -> Dict[str, str]:
     """Compute ISS-derived mean/t maps per participant and save to disk.
 
     Uses the shared global mask (reference_nifti) for voxel alignment. If <3
     participants are available, logs a warning and skips processing.
+    
+    Parameters
+    ----------
+    fc_change_matrices : Dict[str, np.ndarray]
+        FC change matrices for each participant (can be large)
+    participant_ids : List[str]
+        List of participant IDs
+    reference_nifti : str
+        Path to reference NIfTI for mask and affine
+    output_dir : str
+        Output directory for ISS results
+    voxel_chunk_size : int
+        Number of voxels to process at once. Smaller = less memory, slower computation.
+        Default 500 processes ~19 MB at a time for 37 participants.
+        Reduce to 200-300 if running out of memory; increase to 1000+ if memory-rich system.
+    use_float32 : bool
+        Store output as float32 instead of float64 (saves 50% disk/memory for ISS results)
+    
+    Returns
+    -------
+    Dict[str, str]
+        Paths to output NIfTI files for each participant
     """
 
     n_subj = len(participant_ids)
@@ -149,25 +184,46 @@ def process_group_inter_subject_analysis(fc_change_matrices: Dict[str, np.ndarra
             )
 
     outputs: Dict[str, str] = {}
-
+    
+    # Use float32 for output to save space
+    dtype_out = np.float32 if use_float32 else float
+    
     # Pre-allocate per-participant flat arrays
-    mean_flat = {pid: np.full(mask_indices.shape[0], np.nan, dtype=float) for pid in participant_ids}
-    t_flat = {pid: np.full(mask_indices.shape[0], np.nan, dtype=float) for pid in participant_ids}
+    mean_flat = {pid: np.full(mask_indices.shape[0], np.nan, dtype=dtype_out) for pid in participant_ids}
+    t_flat = {pid: np.full(mask_indices.shape[0], np.nan, dtype=dtype_out) for pid in participant_ids}
 
     # Build list of FC matrices in participant order for quick access
     fc_list = [fc_change_matrices[pid] for pid in participant_ids]
+    
+    # Estimate memory usage and report
+    chunk_mem_mb = (voxel_chunk_size * n_subj * 6162 * 8) / (1024 * 1024)
+    print(f"Processing {n_voxels} voxels in chunks of {voxel_chunk_size} (~{chunk_mem_mb:.1f} MB per chunk)")
 
-    for idx, flat_idx in enumerate(voxel_positions):
-        # Collect per-participant FC-change rows for this voxel
-        rows = np.stack([fc[idx, :] for fc in fc_list], axis=0)
+    # Process voxels in chunks to avoid memory explosion
+    for chunk_start in range(0, len(voxel_positions), voxel_chunk_size):
+        chunk_end = min(chunk_start + voxel_chunk_size, len(voxel_positions))
+        chunk_indices = voxel_positions[chunk_start:chunk_end]
+        
+        if (chunk_end - chunk_start) % 100 == 0 or chunk_end == len(voxel_positions):
+            print(f"  Processing voxels {chunk_start}-{chunk_end}/{len(voxel_positions)}")
 
-        # Compute ISS (Fisher-Z) for this voxel
-        iss_z = calculate_inter_subject_similarity_matrix(rows)
+        # Process each voxel in the chunk
+        for local_idx, flat_idx in enumerate(chunk_indices):
+            idx = chunk_start + local_idx
+            
+            # Collect per-participant FC-change rows for this voxel
+            # Build this incrementally to avoid large temporary array
+            rows = np.empty((n_subj, 6162), dtype=np.float32)
+            for subj_idx, fc in enumerate(fc_list):
+                rows[subj_idx, :] = fc[idx, :]
 
-        for subj_idx, pid in enumerate(participant_ids):
-            mean_val, t_val = calculate_inter_subject_statistics(iss_z[subj_idx], self_index=subj_idx)
-            mean_flat[pid][flat_idx] = mean_val
-            t_flat[pid][flat_idx] = t_val
+            # Compute ISS (Fisher-Z) for this voxel
+            iss_z = calculate_inter_subject_similarity_matrix(rows)
+
+            for subj_idx, pid in enumerate(participant_ids):
+                mean_val, t_val = calculate_inter_subject_statistics(iss_z[subj_idx], self_index=subj_idx)
+                mean_flat[pid][flat_idx] = dtype_out(mean_val)
+                t_flat[pid][flat_idx] = dtype_out(t_val)
 
     # Save outputs per participant
     for pid in participant_ids:
@@ -183,8 +239,13 @@ def process_group_inter_subject_analysis(fc_change_matrices: Dict[str, np.ndarra
         out_file = os.path.join(subj_dir, f"sub-{pid}_desc-ISS_mean_tstat.nii.gz")
         save_brain_map_with_statistics(out_file, mean_vol, t_vol, reference_nifti)
         outputs[pid] = out_file
+        
+        # Free memory for this participant's results before saving next
+        del mean_flat[pid]
+        del t_flat[pid]
 
     return outputs
+
 
 
 def load_participants_metadata(bids_dir: str) -> Dict[str, Any]:
