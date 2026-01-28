@@ -510,8 +510,10 @@ def run_3dmema_analysis(
     if covariate_file:
         cmd.extend(["-covariates", covariate_file])
         # Since we've already z-scored/contrast-coded, center at 0 (no additional centering)
-        centering_args = " ".join([f"{cov}=0" for cov in covariate_names])
-        cmd.extend(["-covariates_center", centering_args])
+        # Each covariate center is specified as: COV_NAME = CENTER_VALUE
+        cmd.append("-covariates_center")
+        for cov_name in covariate_names:
+            cmd.extend([cov_name, "=", "0"])
     
     print("\nRunning 3dMEMA group analysis...")
     print(f"  Participants: {sorted(iss_results.keys())}")
