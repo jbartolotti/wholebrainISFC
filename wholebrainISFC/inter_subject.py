@@ -486,13 +486,15 @@ def run_3dmema_analysis(
     cmd = [
         "3dMEMA",
         "-prefix", output_prefix,
-        "-set", set_label,
     ]
     
-    # Add covariates to the command (before subject data)
+    # Add covariates to the command (BEFORE -set declaration)
     if covariate_names:
         for cov_name in covariate_names:
             cmd.extend(["-cov", cov_name])
+    
+    # Now add the -set declaration
+    cmd.extend(["-set", set_label])
     
     # Add participant data: sub-ID [cov1_val cov2_val ...] mean_volume'[0]' tstat_volume'[1]'
     for pid, nifti_path in sorted(iss_results.items()):
