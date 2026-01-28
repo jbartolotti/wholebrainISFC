@@ -195,6 +195,238 @@ def load_participant_ids(
     return all_pids
 
 
+def process_participants_batch(
+    participant_ids: List[str],
+    treatment_label: str,
+    control_label: str,
+    data_dir: str,
+    bids_dir: str,
+    use_bids: bool = False,
+    session: Optional[str] = None,
+    space: str = "MNI152NLin2009cAsym",
+    global_mask_file: Optional[str] = None,
+    target_resolution: float = config.DEFAULT_TARGET_RESOLUTION,
+    apply_censoring: bool = True,
+    debug: bool = False,
+    allow_mask_resample: bool = False,
+    allow_no_mask: bool = False,
+    output_dir: Optional[str] = None,
+    save_outputs: bool = True,
+    save_heatmaps: bool = True,
+    save_niftis: bool = True,
+    force_overwrite: bool = False,
+) -> Dict[str, bool]:
+    """
+    Process participants one at a time, keeping only one participant's data in memory at a time.
+    
+    This function is ideal for processing large cohorts where memory is limited. Each participant
+    is processed sequentially and their results are saved to disk before moving to the next.
+    
+    Args:
+        participant_ids: List of participant IDs to process.
+        treatment_label: Condition/task label for treatment arm.
+        control_label: Condition/task label for control arm.
+        data_dir: Directory containing participant data (ad-hoc mode).
+        bids_dir: BIDS root directory.
+        use_bids: Whether to use BIDS-formatted inputs.
+        session: Session label if applicable.
+        space: Target space (e.g., "MNI152NLin2009cAsym").
+        global_mask_file: Path to global mask file, or None to create from individual masks.
+        target_resolution: Target voxel resolution in mm.
+        apply_censoring: Whether to apply censoring.
+        debug: Enable debug output.
+        allow_mask_resample: Allow resampling individual masks to global mask space.
+        allow_no_mask: Allow processing without a mask.
+        output_dir: Directory for outputs (defaults to derivatives).
+        save_outputs: Save .npy matrices.
+        save_heatmaps: Save heatmap visualizations.
+        save_niftis: Save NIfTI outputs.
+        force_overwrite: If False, skip participant processing when all expected outputs already exist.
+    
+    Returns:
+        Dictionary mapping participant_id to success boolean (True=processed/cached, False=failed).
+    """
+    if bids_dir is None:
+        raise ValueError("bids_dir is required")
+
+    deriv_root = os.path.join(bids_dir, "derivatives", "wholebrainISFC")
+    if output_dir is None:
+        output_dir = deriv_root
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load global mask once
+    mask_affine = None
+    global_mask = None
+
+    if global_mask_file is None and use_bids:
+        default_mask = _pick_first_existing([
+            os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                         f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask.nii.gz"),
+            os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                         f"global_space-{space}_res-{int(target_resolution)}_desc-union_mask.nii"),
+        ])
+        if not default_mask:
+            default_mask = _pick_first_existing([
+                os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                             f"global_space-{space}_desc-union_mask.nii.gz"),
+                os.path.join(bids_dir, "derivatives", "wholebrainISFC", "masks",
+                             f"global_space-{space}_desc-union_mask.nii"),
+            ])
+        if default_mask:
+            global_mask_file = default_mask
+
+    if global_mask_file:
+        print(f"Loading global mask from file: {global_mask_file}")
+        if not os.path.exists(global_mask_file):
+            raise FileNotFoundError(f"Global mask file not found: {global_mask_file}")
+        global_mask = downsample_mask(global_mask_file, target_resolution)
+        cached_mask_path = _cached_downsample_path(global_mask_file, target_resolution)
+        if os.path.exists(cached_mask_path):
+            mask_affine = nib.load(cached_mask_path).affine
+        else:
+            mask_affine = _rescale_affine_to_resolution(nib.load(global_mask_file).affine, target_resolution)
+        print(f"  Global mask loaded: {global_mask.shape}, {int(np.sum(global_mask > 0))} voxels\n")
+
+    # Process each participant individually without keeping results in memory
+    results = {}
+    for i, participant_id in enumerate(participant_ids, 1):
+        print(f"\n[{i}/{len(participant_ids)}] Processing participant: {participant_id}")
+        print("-" * 80)
+        
+        try:
+            resolved = {}
+            participant_data_dir = data_dir
+            if use_bids:
+                resolved = resolve_bids_inputs(
+                    bids_dir=bids_dir,
+                    participant_id=participant_id,
+                    treatment_label=treatment_label,
+                    control_label=control_label,
+                    session=session,
+                    space=space,
+                    res_label=str(int(target_resolution)),
+                )
+                participant_data_dir = resolved["func_dir"]
+
+            # Build derivative paths
+            sub_dir_parts = [f"sub-{participant_id}"]
+            if session:
+                sub_dir_parts.append(f"ses-{session}")
+            sub_dir_parts.append(f"res-{int(target_resolution)}")
+            participant_out_dir = os.path.join(output_dir, *sub_dir_parts)
+            figures_dir = os.path.join(participant_out_dir, "figures")
+            os.makedirs(participant_out_dir, exist_ok=True)
+            os.makedirs(figures_dir, exist_ok=True)
+
+            stem_base = f"sub-{participant_id}"
+            if session:
+                stem_base += f"_ses-{session}"
+            stem_base += f"_space-{space}_res-{int(target_resolution)}"
+
+            # Check if outputs exist
+            required_files = []
+            if save_outputs:
+                required_files.extend([
+                    os.path.join(participant_out_dir, f"{stem_base}_task-{treatment_label}_desc-FC_matrix.npy"),
+                    os.path.join(participant_out_dir, f"{stem_base}_task-{control_label}_desc-FC_matrix.npy"),
+                    os.path.join(participant_out_dir, f"{stem_base}_desc-FCchange_matrix.npy"),
+                ])
+
+            if save_outputs and not force_overwrite and required_files and all(os.path.exists(f) for f in required_files):
+                print(f"✓ Outputs exist; skipping (set force_overwrite=True to recompute)")
+                results[participant_id] = True
+                continue
+
+            # Process this participant
+            treatment_fc, control_fc, fc_change = participant_fc.process_participant(
+                participant_id=participant_id,
+                data_dir=participant_data_dir,
+                treatment_condition=treatment_label,
+                control_condition=control_label,
+                global_mask=global_mask,
+                target_resolution=target_resolution,
+                apply_censoring=apply_censoring,
+                debug=debug,
+                mask_affine=mask_affine,
+                global_mask_file=global_mask_file,
+                allow_mask_resample=allow_mask_resample,
+                allow_no_mask=allow_no_mask,
+                treatment_file=resolved.get("treatment_file"),
+                control_file=resolved.get("control_file"),
+                treatment_mask_file=resolved.get("treatment_mask_file"),
+                control_mask_file=resolved.get("control_mask_file"),
+                treatment_censor_file=resolved.get("treatment_censor_file"),
+                control_censor_file=resolved.get("control_censor_file"),
+            )
+
+            if save_outputs:
+                # Save matrices to disk immediately (don't keep in memory)
+                np.save(os.path.join(participant_out_dir, f"{stem_base}_task-{treatment_label}_desc-FC_matrix.npy"), treatment_fc)
+                np.save(os.path.join(participant_out_dir, f"{stem_base}_task-{control_label}_desc-FC_matrix.npy"), control_fc)
+                np.save(os.path.join(participant_out_dir, f"{stem_base}_desc-FCchange_matrix.npy"), fc_change)
+
+                if save_heatmaps:
+                    _create_heatmap(
+                        treatment_fc,
+                        f"Treatment FC Matrix\nParticipant {participant_id}",
+                        os.path.join(figures_dir, f"{stem_base}_task-{treatment_label}_desc-FC_matrix.png"),
+                        cmap='viridis',
+                        center_zero=False,
+                    )
+                    _create_heatmap(
+                        control_fc,
+                        f"Control FC Matrix\nParticipant {participant_id}",
+                        os.path.join(figures_dir, f"{stem_base}_task-{control_label}_desc-FC_matrix.png"),
+                        cmap='viridis',
+                        center_zero=False,
+                    )
+                    _create_heatmap(
+                        fc_change,
+                        f"FC Change (Treatment - Control)\nParticipant {participant_id}",
+                        os.path.join(figures_dir, f"{stem_base}_desc-FCchange_matrix.png"),
+                        cmap='RdBu_r',
+                        center_zero=True,
+                    )
+
+                if save_niftis:
+                    if global_mask is None:
+                        print("  WARNING: No global mask available; skipping NIfTI outputs")
+                    else:
+                        fc_matrices_file = os.path.join(participant_out_dir, f"{stem_base}_desc-FCstack_bold.nii")
+                        participant_fc.save_fc_matrices_as_nifti(
+                            treatment_fc=treatment_fc,
+                            control_fc=control_fc,
+                            fc_change=fc_change,
+                            global_mask=global_mask,
+                            output_file=fc_matrices_file,
+                            target_resolution=target_resolution,
+                            mask_affine=mask_affine,
+                        )
+
+                        mean_fc_map_file = os.path.join(participant_out_dir, f"{stem_base}_desc-meanFCchange_map.nii")
+                        participant_fc.create_mean_fc_change_map(
+                            fc_change=fc_change,
+                            global_mask=global_mask,
+                            output_file=mean_fc_map_file,
+                            target_resolution=target_resolution,
+                            mask_affine=mask_affine,
+                        )
+
+            # Explicitly delete large arrays to free memory
+            del treatment_fc, control_fc, fc_change
+            
+            print(f"✓ Participant {participant_id} complete")
+            results[participant_id] = True
+
+        except Exception as e:
+            print(f"✗ Error processing {participant_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            results[participant_id] = False
+
+    return results
+
+
 def run_participants(
     participant_ids: List[str],
     treatment_label: str,
