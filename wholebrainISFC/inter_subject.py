@@ -8,12 +8,14 @@ This module handles:
 - Cluster analysis for significance thresholds
 """
 
+import json
 import os
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Optional, Any
 import warnings
 
 import nibabel as nib
 import numpy as np
+import pandas as pd
 
 
 def calculate_inter_subject_similarity_matrix(voxel_fc_profiles: np.ndarray) -> np.ndarray:
@@ -185,16 +187,240 @@ def process_group_inter_subject_analysis(fc_change_matrices: Dict[str, np.ndarra
     return outputs
 
 
+def load_participants_metadata(bids_dir: str) -> Dict[str, Any]:
+    """Load BIDS participants.json metadata file.
+    
+    Parameters
+    ----------
+    bids_dir : str
+        BIDS root directory.
+    
+    Returns
+    -------
+    dict
+        Dictionary with variable metadata (Type, Levels, ReferenceLevels, etc.)
+    """
+    metadata_file = os.path.join(bids_dir, "participants.json")
+    if not os.path.exists(metadata_file):
+        print(f"Warning: participants.json not found at {metadata_file}")
+        return {}
+    
+    with open(metadata_file, 'r') as f:
+        return json.load(f)
+
+
+def load_participants_data(bids_dir: str) -> pd.DataFrame:
+    """Load BIDS participants.tsv file.
+    
+    Parameters
+    ----------
+    bids_dir : str
+        BIDS root directory.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Participants data with participant_id as index.
+    """
+    participants_file = os.path.join(bids_dir, "participants.tsv")
+    if not os.path.exists(participants_file):
+        raise FileNotFoundError(f"participants.tsv not found: {participants_file}")
+    
+    df = pd.read_csv(participants_file, sep="\t")
+    df = df.set_index("participant_id")
+    return df
+
+
+def prep_covariates_for_3dmema(
+    participant_ids: List[str],
+    covariate_names: List[str],
+    bids_dir: str,
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """Prepare covariates for 3dMEMA analysis.
+    
+    Reads covariate values from participants.tsv, applies contrast coding
+    for categorical variables (centered at 0) and z-scoring for continuous
+    variables (mean=0, sd=1).
+    
+    For categorical variables, the reference level (from participants.json)
+    receives the negative value in contrast coding.
+    
+    For continuous variables, if already normalized (mean≈0, sd≈1) or marked
+    as "Standardized": true in participants.json, normalization is skipped.
+    
+    Parameters
+    ----------
+    participant_ids : list of str
+        Participant IDs (without "sub-" prefix).
+    covariate_names : list of str
+        Names of covariates to include (must exist in participants.tsv).
+    bids_dir : str
+        BIDS root directory.
+    
+    Returns
+    -------
+    tuple of (covariate_data, metadata)
+        covariate_data : dict mapping participant_id to dict of covariate values
+        metadata : dict with covariate types and reference levels
+    """
+    metadata = load_participants_metadata(bids_dir)
+    df = load_participants_data(bids_dir)
+    
+    # First pass: collect raw values
+    raw_values = {cov: [] for cov in covariate_names}
+    pid_mapping = {}  # Map clean_pid to row
+    
+    for pid in participant_ids:
+        full_pid = f"sub-{pid}" if not pid.startswith("sub-") else pid
+        clean_pid = pid.replace("sub-", "") if pid.startswith("sub-") else pid
+        
+        # Find row in dataframe (may be with or without sub- prefix)
+        row = None
+        for idx in df.index:
+            if idx == full_pid or idx == clean_pid or idx == pid:
+                row = df.loc[idx]
+                break
+        
+        if row is None:
+            raise ValueError(f"Participant {pid} not found in participants.tsv")
+        
+        pid_mapping[clean_pid] = row
+        
+        for cov_name in covariate_names:
+            if cov_name not in row.index:
+                raise ValueError(f"Covariate '{cov_name}' not found in participants.tsv for {pid}")
+            
+            value = row[cov_name]
+            
+            # Handle NaN/missing values
+            if pd.isna(value):
+                raise ValueError(f"Missing value for covariate '{cov_name}' in participant {pid}")
+            
+            raw_values[cov_name].append(value)
+    
+    # Second pass: apply coding schemes
+    covariate_data = {}
+    
+    for cov_name in covariate_names:
+        values = raw_values[cov_name]
+        
+        # Determine if categorical or continuous
+        is_categorical = (cov_name in metadata and 
+                         metadata[cov_name].get("Type") == "categorical")
+        
+        if is_categorical:
+            # Contrast coding for categorical variables
+            unique_levels = sorted(set(str(v) for v in values))
+            n_levels = len(unique_levels)
+            
+            # Get reference level from metadata
+            ref_level = None
+            if cov_name in metadata:
+                ref_level = metadata[cov_name].get("ReferenceLevels", None)
+            
+            if n_levels == 2:
+                # Binary variable: use -0.5 and +0.5
+                # Reference level gets -0.5 (if specified), otherwise first alphabetically
+                if ref_level and str(ref_level) in unique_levels:
+                    # Reference gets negative, other gets positive
+                    other_level = [lev for lev in unique_levels if str(lev) != str(ref_level)][0]
+                    level_codes = {str(ref_level): -0.5, other_level: +0.5}
+                else:
+                    # No reference specified or not found: use alphabetical order
+                    level_codes = {unique_levels[0]: -0.5, unique_levels[1]: +0.5}
+                print(f"  Contrast coding for '{cov_name}': {level_codes}")
+            else:
+                # Multi-level categorical: use deviation coding (sum to zero)
+                # Reference level (if specified) gets most negative value
+                if ref_level and str(ref_level) in unique_levels:
+                    # Put reference first, then others alphabetically
+                    ordered_levels = [str(ref_level)] + [lev for lev in unique_levels if str(lev) != str(ref_level)]
+                else:
+                    ordered_levels = unique_levels
+                
+                step = 1.0 / (n_levels - 1) if n_levels > 1 else 0
+                level_codes = {ordered_levels[i]: -0.5 + i * step 
+                              for i in range(n_levels)}
+                print(f"  Contrast coding for '{cov_name}': {level_codes}")
+            
+            # Apply coding to each participant
+            for idx, pid in enumerate(participant_ids):
+                clean_pid = pid.replace("sub-", "") if pid.startswith("sub-") else pid
+                if clean_pid not in covariate_data:
+                    covariate_data[clean_pid] = {}
+                str_value = str(values[idx])
+                covariate_data[clean_pid][cov_name] = level_codes[str_value]
+        else:
+            # Continuous variable: check if already standardized, then z-score if needed
+            numeric_values = np.array([float(v) for v in values])
+            mean_val = np.mean(numeric_values)
+            std_val = np.std(numeric_values, ddof=1)
+            
+            # Check if marked as pre-standardized in metadata
+            is_standardized = (cov_name in metadata and 
+                             metadata[cov_name].get("Standardized", False))
+            
+            # Or detect if already normalized (mean≈0, sd≈1, tolerance of 0.1)
+            is_already_normalized = (abs(mean_val) < 0.1 and abs(std_val - 1.0) < 0.1)
+            
+            if is_standardized:
+                print(f"  '{cov_name}' marked as pre-standardized; using raw values")
+                z_scores = numeric_values
+            elif is_already_normalized:
+                print(f"  '{cov_name}' detected as already normalized (mean={mean_val:.3f}, sd={std_val:.3f}); using raw values")
+                z_scores = numeric_values
+            elif std_val == 0:
+                print(f"  Warning: '{cov_name}' has zero variance; using raw values")
+                z_scores = numeric_values
+            else:
+                z_scores = (numeric_values - mean_val) / std_val
+                print(f"  Z-scored '{cov_name}': mean={mean_val:.2f}, sd={std_val:.2f}")
+            
+            # Apply z-scores to each participant
+            for idx, pid in enumerate(participant_ids):
+                clean_pid = pid.replace("sub-", "") if pid.startswith("sub-") else pid
+                if clean_pid not in covariate_data:
+                    covariate_data[clean_pid] = {}
+                covariate_data[clean_pid][cov_name] = float(z_scores[idx])
+    
+    return covariate_data, metadata
+
+
+def validate_covariates(covariate_names: List[str], covariate_data: Dict[str, Dict[str, Any]]) -> None:
+    """Validate that all participants have non-NaN covariate values.
+    
+    Parameters
+    ----------
+    covariate_names : list of str
+        Names of covariates.
+    covariate_data : dict
+        Mapping of participant_id to covariate values.
+    
+    Raises
+    ------
+    ValueError
+        If any covariate values are missing or invalid.
+    """
+    for pid, covs in covariate_data.items():
+        for cov_name in covariate_names:
+            if cov_name not in covs:
+                raise ValueError(f"Missing covariate '{cov_name}' for participant {pid}")
+            if not np.isfinite(covs[cov_name]):
+                raise ValueError(f"Invalid covariate value for '{cov_name}' in participant {pid}: {covs[cov_name]}")
+
+
 def run_3dmema_analysis(
     iss_results: Dict[str, str],
     output_dir: str,
     set_label: str = "ISS",
+    bids_dir: Optional[str] = None,
+    covariate_names: Optional[List[str]] = None,
 ) -> str:
     """
     Run AFNI's 3dMEMA for mixed-effects meta-analysis on ISS results.
     
     Performs one-sample group analysis using mean and t-statistic volumes
-    from each participant's ISS brain maps.
+    from each participant's ISS brain maps. Optionally includes covariates.
     
     Parameters
     ----------
@@ -205,6 +431,10 @@ def run_3dmema_analysis(
         Output directory for 3dMEMA results.
     set_label : str
         Label for the analysis set (default "ISS").
+    bids_dir : str, optional
+        BIDS root directory (required if using covariates).
+    covariate_names : list of str, optional
+        Names of covariates to include in the model. Must exist in participants.tsv.
     
     Returns
     -------
@@ -217,6 +447,8 @@ def run_3dmema_analysis(
         If 3dMEMA command fails or is not found.
     FileNotFoundError
         If any ISS input files are missing.
+    ValueError
+        If covariates are requested but bids_dir is not provided, or covariate data is invalid.
     """
     import subprocess
     
@@ -230,6 +462,24 @@ def run_3dmema_analysis(
         if not os.path.exists(nifti_path):
             raise FileNotFoundError(f"ISS file not found for {pid}: {nifti_path}")
     
+    # Prepare covariates if requested
+    covariate_data = {}
+    if covariate_names:
+        if not bids_dir:
+            raise ValueError("bids_dir is required to load covariates")
+        if not covariate_names:
+            covariate_names = []
+        
+        covariate_data, metadata = prep_covariates_for_3dmema(
+            list(iss_results.keys()),
+            covariate_names,
+            bids_dir,
+        )
+        validate_covariates(covariate_names, covariate_data)
+        print(f"  Covariates: {covariate_names}")
+        for pid, covs in covariate_data.items():
+            print(f"    {pid}: {covs}")
+    
     # Build 3dMEMA command
     output_prefix = os.path.join(output_dir, f"3dMEMA_{set_label}")
     
@@ -239,13 +489,25 @@ def run_3dmema_analysis(
         "-set", set_label,
     ]
     
-    # Add participant data: sub-ID mean_volume'[0]' tstat_volume'[1]'
+    # Add covariates to the command (before subject data)
+    if covariate_names:
+        for cov_name in covariate_names:
+            cmd.extend(["-cov", cov_name])
+    
+    # Add participant data: sub-ID [cov1_val cov2_val ...] mean_volume'[0]' tstat_volume'[1]'
     for pid, nifti_path in sorted(iss_results.items()):
-        cmd.extend([
-            f"sub-{pid}",
-            f"{nifti_path}[0]",  # Mean volume
-            f"{nifti_path}[1]",  # T-stat volume
-        ])
+        clean_pid = pid.replace("sub-", "") if pid.startswith("sub-") else pid
+        cmd.append(f"sub-{clean_pid}")
+        
+        # Add covariate values if present
+        if covariate_names and clean_pid in covariate_data:
+            covs = covariate_data[clean_pid]
+            for cov_name in covariate_names:
+                cmd.append(str(covs[cov_name]))
+        
+        # Add mean and t-stat volumes
+        cmd.append(f"{nifti_path}[0]")  # Mean volume
+        cmd.append(f"{nifti_path}[1]")  # T-stat volume
     
     print("\nRunning 3dMEMA group analysis...")
     print(f"  Participants: {sorted(iss_results.keys())}")

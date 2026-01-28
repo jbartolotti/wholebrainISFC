@@ -472,6 +472,7 @@ def run_group_3dmema_analysis(
     bids_dir: str,
     output_dir: Optional[str] = None,
     set_label: str = "ISS",
+    covariate_names: Optional[List[str]] = None,
 ) -> str:
     """
     Run AFNI 3dMEMA mixed-effects meta-analysis on ISS results.
@@ -486,6 +487,8 @@ def run_group_3dmema_analysis(
         Output directory for 3dMEMA results. Defaults to derivatives/wholebrainISFC/group/3dMEMA.
     set_label : str
         Label for the analysis set (default "ISS").
+    covariate_names : list of str, optional
+        Names of covariates to include (must exist in participants.tsv and participants.json).
 
     Returns
     -------
@@ -506,11 +509,15 @@ def run_group_3dmema_analysis(
             iss_results=iss_results,
             output_dir=output_dir,
             set_label=set_label,
+            bids_dir=bids_dir,
+            covariate_names=covariate_names,
         )
         print(f"✓ 3dMEMA analysis complete: {mema_output}")
         return mema_output
     except Exception as e:
         print(f"⚠ 3dMEMA analysis failed: {e}")
+        import traceback
+        traceback.print_exc()
         return ""
 
 
