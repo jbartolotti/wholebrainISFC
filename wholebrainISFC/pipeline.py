@@ -668,13 +668,14 @@ def run_participants(
 
 def run_group_inter_subject_analysis(
     participant_ids: List[str],
-    results_dict: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]],
     bids_dir: str,
     output_dir: Optional[str] = None,
     target_resolution: float = config.DEFAULT_TARGET_RESOLUTION,
     space: str = "MNI152NLin2009cAsym",
     voxel_chunk_size: int = 500,
     use_float32: bool = True,
+    fc_change_matrices: Optional[Dict[str, np.ndarray]] = None,
+    results_dict: Optional[Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]] = None,
 ) -> Dict[str, str]:
     """
     Run group-level inter-subject similarity (ISS) analysis.
@@ -686,9 +687,6 @@ def run_group_inter_subject_analysis(
     ----------
     participant_ids : list of str
         Participant IDs that were processed.
-    results_dict : dict
-        Dictionary mapping participant_id to (treatment_fc, control_fc, fc_change) tuples
-        from run_participants.
     bids_dir : str
         BIDS root directory where derivatives are stored.
     output_dir : str, optional
@@ -703,13 +701,33 @@ def run_group_inter_subject_analysis(
         Reduce to 200-300 if out of memory; increase to 1000+ if memory-rich.
     use_float32 : bool
         Store outputs as float32 (saves 50% disk space) instead of float64.
+    fc_change_matrices : Dict[str, np.ndarray], optional
+        Pre-extracted FC-change matrices (RECOMMENDED for memory efficiency).
+        Dict mapping participant_id to fc_change matrix. Use this when loading
+        from disk to avoid loading unnecessary treatment/control FC matrices.
+    results_dict : Dict, optional
+        Legacy parameter. Dictionary mapping participant_id to (treatment_fc, control_fc, fc_change) tuples.
+        If provided, fc_change_matrices is extracted from this. Ignored if fc_change_matrices is provided.
 
     Returns
     -------
     dict
         Dictionary mapping participant_id to output NIfTI file paths.
+    
+    Notes
+    -----
+    For memory efficiency with large datasets, use fc_change_matrices directly.
+    Example: 37 participants × 6162×6162 matrices
+      - Loading all three matrices: ~33.8 GB
+      - Loading only fc_change: ~11.3 GB
     """
     from wholebrainISFC import inter_subject
+
+    # Handle both input formats for backward compatibility
+    if fc_change_matrices is None:
+        if results_dict is None:
+            raise ValueError("Must provide either fc_change_matrices or results_dict")
+        fc_change_matrices = {pid: results_dict[pid][2] for pid in participant_ids}
 
     if output_dir is None:
         output_dir = os.path.join(bids_dir, "derivatives", "wholebrainISFC")
@@ -717,9 +735,6 @@ def run_group_inter_subject_analysis(
     if len(participant_ids) < 3:
         print(f"WARNING: Skipping group ISS (need ≥3 participants, have {len(participant_ids)})")
         return {}
-
-    # Extract FC-change matrices
-    fc_change_matrices = {pid: results_dict[pid][2] for pid in participant_ids}
 
     # Find the global mask as reference (should be in derivatives/masks/)
     ref_nifti = _pick_first_existing([
