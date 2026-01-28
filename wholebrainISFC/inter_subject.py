@@ -464,6 +464,8 @@ def run_3dmema_analysis(
     
     # Prepare covariates if requested
     covariate_data = {}
+    covariate_file = None
+    
     if covariate_names:
         if not bids_dir:
             raise ValueError("bids_dir is required to load covariates")
@@ -479,6 +481,12 @@ def run_3dmema_analysis(
         print(f"  Covariates: {covariate_names}")
         for pid, covs in covariate_data.items():
             print(f"    {pid}: {covs}")
+        
+        # Write covariates to a file for 3dMEMA
+        covariate_file = os.path.join(output_dir, f"covariates_{set_label}.txt")
+        _write_covariates_file(covariate_file, covariate_names, covariate_data, 
+                              sorted(iss_results.keys()))
+        print(f"  Covariates file: {covariate_file}")
     
     # Build 3dMEMA command
     output_prefix = os.path.join(output_dir, f"3dMEMA_{set_label}")
@@ -486,35 +494,31 @@ def run_3dmema_analysis(
     cmd = [
         "3dMEMA",
         "-prefix", output_prefix,
+        "-set", set_label,
     ]
     
-    # Add covariates to the command (BEFORE -set declaration)
-    if covariate_names:
-        for cov_name in covariate_names:
-            cmd.extend(["-cov", cov_name])
+    # Add covariates file and centering if present
+    if covariate_file:
+        cmd.extend(["-covariates", covariate_file])
+        # Since we've already z-scored/contrast-coded, center at 0 (no additional centering)
+        centering_args = " ".join([f"{cov}=0" for cov in covariate_names])
+        cmd.extend(["-covariates_center", centering_args])
     
-    # Now add the -set declaration
-    cmd.extend(["-set", set_label])
-    
-    # Add participant data: sub-ID [cov1_val cov2_val ...] mean_volume'[0]' tstat_volume'[1]'
+    # Add participant data: sub-ID mean_volume'[0]' tstat_volume'[1]'
     for pid, nifti_path in sorted(iss_results.items()):
         clean_pid = pid.replace("sub-", "") if pid.startswith("sub-") else pid
-        cmd.append(f"sub-{clean_pid}")
-        
-        # Add covariate values if present
-        if covariate_names and clean_pid in covariate_data:
-            covs = covariate_data[clean_pid]
-            for cov_name in covariate_names:
-                cmd.append(str(covs[cov_name]))
-        
-        # Add mean and t-stat volumes
-        cmd.append(f"{nifti_path}[0]")  # Mean volume
-        cmd.append(f"{nifti_path}[1]")  # T-stat volume
+        cmd.extend([
+            f"sub-{clean_pid}",
+            f"{nifti_path}[0]",  # Mean volume
+            f"{nifti_path}[1]",  # T-stat volume
+        ])
     
     print("\nRunning 3dMEMA group analysis...")
     print(f"  Participants: {sorted(iss_results.keys())}")
     print(f"  Output prefix: {output_prefix}")
-    print(f"  Command: {' '.join(cmd)}")
+    if covariate_file:
+        print(f"  Covariates file: {covariate_file}")
+    print(f"  Command: {' '.join(cmd[:10])}...")  # Print first 10 args to avoid huge output
     
     # Run 3dMEMA
     try:
@@ -525,7 +529,7 @@ def run_3dmema_analysis(
             check=True,
         )
         print("  3dMEMA stdout:")
-        for line in result.stdout.strip().split('\n'):
+        for line in result.stdout.strip().split('\n')[-10:]:  # Print last 10 lines
             print(f"    {line}")
     except subprocess.CalledProcessError as e:
         print(f"  ERROR: 3dMEMA failed with return code {e.returncode}")
@@ -543,6 +547,43 @@ def run_3dmema_analysis(
             output_file = output_prefix + ".nii.gz"
     
     return output_file
+
+
+def _write_covariates_file(
+    filepath: str,
+    covariate_names: List[str],
+    covariate_data: Dict[str, Dict[str, float]],
+    participant_ids: List[str],
+) -> None:
+    """Write covariates to a text file in 3dMEMA format.
+    
+    Creates a tab-separated file with subject IDs in first column and
+    covariate values in subsequent columns.
+    
+    Parameters
+    ----------
+    filepath : str
+        Output file path.
+    covariate_names : list of str
+        Names of covariates (column headers).
+    covariate_data : dict
+        Mapping of participant_id to covariate values.
+    participant_ids : list of str
+        Participant IDs in desired order.
+    """
+    with open(filepath, 'w') as f:
+        # Write header
+        header = ['subj'] + covariate_names
+        f.write('\t'.join(header) + '\n')
+        
+        # Write data rows
+        for pid in participant_ids:
+            clean_pid = pid.replace("sub-", "") if pid.startswith("sub-") else pid
+            row = [f"sub-{clean_pid}"]
+            if clean_pid in covariate_data:
+                for cov_name in covariate_names:
+                    row.append(str(covariate_data[clean_pid][cov_name]))
+            f.write('\t'.join(row) + '\n')
 
 
 def run_3dmema_with_covariates(brain_maps: Dict[str, Tuple[str, str]], 
