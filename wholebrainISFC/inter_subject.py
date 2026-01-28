@@ -497,13 +497,6 @@ def run_3dmema_analysis(
         "-set", set_label,
     ]
     
-    # Add covariates file and centering if present
-    if covariate_file:
-        cmd.extend(["-covariates", covariate_file])
-        # Since we've already z-scored/contrast-coded, center at 0 (no additional centering)
-        centering_args = " ".join([f"{cov}=0" for cov in covariate_names])
-        cmd.extend(["-covariates_center", centering_args])
-    
     # Add participant data: sub-ID mean_volume'[0]' tstat_volume'[1]'
     for pid, nifti_path in sorted(iss_results.items()):
         clean_pid = pid.replace("sub-", "") if pid.startswith("sub-") else pid
@@ -512,6 +505,13 @@ def run_3dmema_analysis(
             f"{nifti_path}[0]",  # Mean volume
             f"{nifti_path}[1]",  # T-stat volume
         ])
+    
+    # Add covariates file and centering AFTER -set and subject data
+    if covariate_file:
+        cmd.extend(["-covariates", covariate_file])
+        # Since we've already z-scored/contrast-coded, center at 0 (no additional centering)
+        centering_args = " ".join([f"{cov}=0" for cov in covariate_names])
+        cmd.extend(["-covariates_center", centering_args])
     
     print("\nRunning 3dMEMA group analysis...")
     print(f"  Participants: {sorted(iss_results.keys())}")
