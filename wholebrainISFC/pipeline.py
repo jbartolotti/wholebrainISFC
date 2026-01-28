@@ -142,6 +142,59 @@ def resolve_bids_inputs(
     }
 
 
+def load_participant_ids(
+    bids_dir: str,
+    participant_ids: Optional[List[str]] = None,
+    use_include_column: bool = False,
+) -> List[str]:
+    """
+    Load and optionally filter participant IDs based on participants.tsv.
+    
+    Args:
+        bids_dir: Path to BIDS root directory.
+        participant_ids: Explicit list of participant IDs to use. If None and use_include_column=True,
+                        load all participants from participants.tsv with include=1.
+                        If None and use_include_column=False, load all participants from participants.tsv.
+        use_include_column: If True, filter participants based on "include" column in participants.tsv
+                           (1=include, 0=exclude). If False, include all non-excluded rows.
+    
+    Returns:
+        Filtered list of participant IDs.
+    
+    Raises:
+        FileNotFoundError: If participants.tsv not found.
+        ValueError: If participant_ids is None and use_include_column=False but participants.tsv lacks 'participant_id' column.
+    """
+    import pandas as pd
+    
+    participants_file = os.path.join(bids_dir, "participants.tsv")
+    if not os.path.exists(participants_file):
+        raise FileNotFoundError(f"participants.tsv not found at {participants_file}")
+    
+    # Load participants.tsv
+    df = pd.read_csv(participants_file, sep="\t")
+    
+    # If explicit list provided, return as-is
+    if participant_ids is not None:
+        return participant_ids
+    
+    # Otherwise, load from participants.tsv
+    if "participant_id" not in df.columns:
+        raise ValueError("participants.tsv must have 'participant_id' column")
+    
+    all_pids = df["participant_id"].str.replace("sub-", "", regex=False).tolist()
+    
+    # If use_include_column=True, filter by "include" column
+    if use_include_column:
+        if "include" not in df.columns:
+            raise ValueError("use_include_column=True but 'include' column not found in participants.tsv")
+        filtered_pids = df[df["include"] == 1]["participant_id"].str.replace("sub-", "", regex=False).tolist()
+        return filtered_pids
+    
+    # Otherwise return all participant IDs
+    return all_pids
+
+
 def run_participants(
     participant_ids: List[str],
     treatment_label: str,
